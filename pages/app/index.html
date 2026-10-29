@@ -1,0 +1,809 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>供应商统一管理</title>
+    <style>
+      :root {
+        --bg: #ffffff;
+        --panel: #ffffff;
+        --fg: #1f2328;
+        --muted: #656d76;
+        --border: #d8dee4;
+        --border-strong: #afb8c1;
+        --hover: #f6f8fa;
+        --accent: #0969da;
+        --accent-fg: #ffffff;
+        --warn-bg: #fff8c5;
+        --warn-fg: #7d4e00;
+        --ok: #1a7f37;
+        --err: #cf222e;
+        --chip: #eef1f4;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0d1117;
+          --panel: #161b22;
+          --fg: #e6edf3;
+          --muted: #8b949e;
+          --border: #30363d;
+          --border-strong: #484f58;
+          --hover: #1c2128;
+          --accent: #2f81f7;
+          --accent-fg: #ffffff;
+          --warn-bg: #3b2f00;
+          --warn-fg: #e3b341;
+          --ok: #3fb950;
+          --err: #f85149;
+          --chip: #21262d;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 20px 24px 40px;
+        background: var(--bg);
+        color: var(--fg);
+        font: 14px/1.6 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+      }
+      header h1 { margin: 0 0 4px; font-size: 20px; font-weight: 600; }
+      .sub { margin: 0; color: var(--muted); font-size: 13px; }
+      .notice {
+        margin: 16px 0;
+        padding: 10px 14px;
+        border-radius: 8px;
+        background: var(--warn-bg);
+        color: var(--warn-fg);
+        font-size: 13px;
+        border: 1px solid color-mix(in srgb, var(--warn-fg) 25%, transparent);
+      }
+      .notice b { font-weight: 600; }
+
+      /* 供应商池：五类能力各一张小卡 */
+      .pool { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 16px; }
+      .pool .card {
+        flex: 1 1 150px;
+        padding: 10px 12px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--panel);
+        cursor: pointer;
+        transition: border-color 0.15s;
+      }
+      .pool .card:hover { border-color: var(--accent); }
+      .pool .card.active { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+      .pool .card .t { font-size: 12px; color: var(--muted); }
+      .pool .card .n { font-size: 20px; font-weight: 600; }
+      .pool .card.zero .n { color: var(--muted); }
+
+      .toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 10px;
+        padding: 12px 14px;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        position: sticky;
+        top: 0;
+        z-index: 5;
+      }
+      .toolbar label { color: var(--muted); font-size: 13px; display: inline-flex; align-items: center; gap: 6px; }
+      .spacer { flex: 1; }
+      select, button {
+        font: inherit;
+        font-size: 13px;
+        color: var(--fg);
+        background: var(--panel);
+        border: 1px solid var(--border-strong);
+        border-radius: 7px;
+        padding: 5px 9px;
+        cursor: pointer;
+      }
+      select { min-width: 180px; max-width: 340px; }
+      button:hover { background: var(--hover); }
+      button.primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: var(--accent-fg);
+        font-weight: 600;
+        padding: 6px 16px;
+      }
+      button.primary:hover { filter: brightness(1.08); }
+      button:disabled { opacity: 0.5; cursor: not-allowed; }
+      #pending { color: var(--muted); font-size: 13px; }
+      #pending.dirty { color: var(--accent); font-weight: 600; }
+      #scanned { color: var(--muted); font-size: 12px; }
+      main { margin-top: 16px; }
+      .group { margin-bottom: 22px; }
+      .group > h2 {
+        margin: 0 0 8px;
+        font-size: 14px;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .group > h2 .count { color: var(--muted); font-weight: 400; font-size: 12px; }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        overflow: hidden;
+      }
+      th, td { padding: 8px 10px; text-align: left; vertical-align: middle; border-bottom: 1px solid var(--border); }
+      th { font-size: 12px; font-weight: 600; color: var(--muted); background: var(--hover); }
+      tr:last-child td { border-bottom: none; }
+      tr:hover td { background: var(--hover); }
+      td.path { font-family: ui-monospace, Consolas, monospace; font-size: 12px; color: var(--muted); word-break: break-all; }
+      .chip {
+        display: inline-block;
+        padding: 1px 7px;
+        border-radius: 999px;
+        background: var(--chip);
+        font-size: 11px;
+        color: var(--muted);
+        white-space: nowrap;
+      }
+      /* 五类能力用不同色相，便于一眼区分 */
+      .chip.t-chat_completion { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); font-weight: 600; }
+      .chip.t-speech_to_text { background: color-mix(in srgb, #8250df 16%, transparent); color: #8250df; font-weight: 600; }
+      .chip.t-text_to_speech { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); font-weight: 600; }
+      .chip.t-embedding { background: color-mix(in srgb, #d1790b 16%, transparent); color: #d1790b; font-weight: 600; }
+      .chip.t-rerank { background: color-mix(in srgb, var(--err) 16%, transparent); color: var(--err); font-weight: 600; }
+      .chip.warn { background: color-mix(in srgb, var(--err) 16%, transparent); color: var(--err); }
+      tr.changed td { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+      tr.mismatch td { background: color-mix(in srgb, var(--err) 7%, transparent); }
+      td select { min-width: 190px; max-width: 300px; width: 100%; }
+      td select[multiple] { padding: 2px; }
+      td select[multiple] option { padding: 2px 4px; }
+      .multi-hint { margin-top: 3px; font-size: 11px; color: var(--muted); line-height: 1.4; }
+      .log {
+        margin-top: 18px;
+        padding: 12px 14px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--panel);
+        font-size: 13px;
+        display: none;
+      }
+      .log.show { display: block; }
+      .log .ok { color: var(--ok); }
+      .log .err { color: var(--err); }
+      .empty { padding: 40px; text-align: center; color: var(--muted); }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>供应商统一管理</h1>
+      <p class="sub">
+        分类口径与 AstrBot 本体「模型提供商」面板一致：条目声明的类型 → 继承所属
+        provider_sources 的类型 → 兜底「对话」。下方列出全局配置、会话配置档与各插件中
+        指向模型供应商的字段，可在此统一修改后写回。
+      </p>
+    </header>
+
+    <div class="notice">
+      本页仅在点击「一键同步」时写入文件，不做常驻监听，未同步的改动不会生效。
+      下拉框只列出同一类能力的供应商，跨类会被拒绝；「回退对话模型」等数组字段支持多选，
+      选择顺序即回退优先级。供应商有增删改时，点「重新扫描」刷新即可。
+    </div>
+
+    <div class="pool" id="pool"></div>
+
+    <div class="toolbar">
+      <button id="rescan" type="button" title="重新读取配置并分类（只读，不写盘）">重新扫描</button>
+      <label>能力筛 <select id="type-filter"><option value="">全部类型</option></select></label>
+      <label>批量设为 <select id="bulk-target"><option value="">选择供应商…</option></select></label>
+      <button id="bulk-apply" type="button">应用到勾选行</button>
+      <button id="select-all" type="button">全选</button>
+      <button id="select-none" type="button">取消全选</button>
+      <label><input type="checkbox" id="show-voice" /> 显示音色表（每个角色本就不同）</label>
+      <span class="spacer"></span>
+      <span id="scanned"></span>
+      <span id="pending">待同步 0 处</span>
+      <button id="sync" class="primary" type="button">一键同步</button>
+    </div>
+
+    <main id="content"><div class="empty">正在扫描配置…</div></main>
+    <div class="log" id="log"></div>
+
+    <script>
+      (function () {
+        let refs = [];
+        let providers = [];
+        let groups = [];
+        let typeOrder = ["chat_completion", "speech_to_text", "text_to_speech", "embedding", "rerank"];
+        let typeLabels = {};
+        let choices = new Map();
+        let showVoice = false;
+        let typeFilter = "";
+        let loading = false;
+
+        const el = (id) => document.getElementById(id);
+        const content = el("content");
+        const logBox = el("log");
+        const pendingBox = el("pending");
+        const scannedBox = el("scanned");
+        const bulkSelect = el("bulk-target");
+        const typeFilterSelect = el("type-filter");
+        const poolBox = el("pool");
+        const rescanBtn = el("rescan");
+
+        /* ---------------- 后端调用 ----------------
+         * 本页跑在 WebUI 的沙箱 iframe 里（sandbox 未给 allow-same-origin，
+         * 页面属于不透明源），**任何直接 fetch 都会被浏览器判成跨域**，
+         * 表现就是 "Failed to fetch"。唯一可用的通道是父窗口注入的
+         * window.AstrBotPluginPage（postMessage 桥接）。
+         * 注意：桥接脚本由服务端插在文档末尾，可能比本脚本晚执行，
+         * 所以每次调用都要先等它出现，不能一次性缓存。另外本文件里
+         * 不要出现 body 结束标签的字面量，否则注入点会被带偏。
+         */
+
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+        function getBridge() {
+          return window.AstrBotPluginPage || window.AstrBotPluginView || null;
+        }
+
+        async function waitBridge(timeout) {
+          const deadline = Date.now() + (timeout || 6000);
+          let bridge = getBridge();
+          while (!bridge && Date.now() < deadline) {
+            await sleep(50);
+            bridge = getBridge();
+          }
+          return bridge;
+        }
+
+        async function apiCall(method, endpoint, payload) {
+          const bridge = await waitBridge();
+          if (!bridge) {
+            throw new Error("页面桥接脚本未加载，请在 AstrBot WebUI 的插件页面里打开（不要直接双击 HTML 文件）");
+          }
+          const fn = method === "GET" ? bridge.apiGet : bridge.apiPost;
+          if (typeof fn !== "function") {
+            throw new Error("桥接对象缺少 " + method + " 接口，请更新 AstrBot 后重试");
+          }
+          return await fn.call(bridge, endpoint, payload || {});
+        }
+
+        const apiGet = (endpoint, params) => apiCall("GET", endpoint, params);
+        const apiPost = (endpoint, body) => apiCall("POST", endpoint, body);
+
+        /** 桥接只把后端的 data 部分回传过来（错误已经以异常形式抛出）；
+         *  为了兼容"直接打开页面"的情况，两种结构都认。 */
+        function unwrap(res) {
+          if (res && typeof res === "object" && typeof res.status === "string") {
+            if (res.status !== "ok" && res.status !== "partial") {
+              throw new Error(res.message || "接口返回失败");
+            }
+            return { data: res.data || {}, message: res.message || "" };
+          }
+          return { data: res || {}, message: "" };
+        }
+
+        /* ---------------- 通用 UI 工具 ---------------- */
+
+        function log(html, kind) {
+          logBox.className = "log show";
+          const line = document.createElement("div");
+          if (kind) line.className = kind;
+          line.innerHTML = html;
+          logBox.appendChild(line);
+        }
+
+        function clearLog() {
+          logBox.innerHTML = "";
+          logBox.className = "log";
+        }
+
+        function buildOption(value, labelText, selected) {
+          const opt = document.createElement("option");
+          opt.value = value;
+          opt.textContent = labelText;
+          if (selected) opt.selected = true;
+          return opt;
+        }
+
+        /** 类型判定来源的说明文案（与本体分类规则一一对应）。 */
+        function typeFromLabel(from) {
+          if (from === "entry") return "条目自己声明的类型";
+          if (from === "source") return "继承自 provider_sources";
+          return "未声明类型，按对话处理";
+        }
+
+        /** 某一行是否参与「待同步」统计与同步提交。 */
+        function isVisible(ref) {
+          if (!showVoice && ref.category === "tts_voice") return false;
+          if (typeFilter && ref.provider_type !== typeFilter) return false;
+          return true;
+        }
+
+        /** 当前编辑中的值：多值字段是数组，单值字段是字符串。 */
+        function currentOf(ref) {
+          if (ref.multi) {
+            const picked = choices.get(ref.key);
+            return Array.isArray(picked) ? picked : ref.values.slice();
+          }
+          return choices.get(ref.key) || ref.value;
+        }
+
+        /** 该行是否已被改动（多值按数组逐项比较）。 */
+        function isDirty(ref) {
+          const now = currentOf(ref);
+          if (ref.multi) {
+            return now.length !== ref.values.length || now.some((v, i) => v !== ref.values[i]);
+          }
+          return now !== ref.value;
+        }
+
+        function updatePending() {
+          let dirty = 0;
+          for (const ref of refs) {
+            if (!isVisible(ref)) continue;
+            if (isDirty(ref)) dirty += 1;
+          }
+          pendingBox.textContent = dirty ? `待同步 ${dirty} 处` : "无待同步改动";
+          pendingBox.className = dirty ? "dirty" : "";
+        }
+
+        /* ---------------- 供应商池（五类概览，可点击筛选） ---------------- */
+
+        function renderPool() {
+          poolBox.innerHTML = "";
+          const all = document.createElement("div");
+          all.className = "card" + (typeFilter === "" ? " active" : "");
+          all.innerHTML = `<div class="t">全部类型</div><div class="n">${providers.length}</div>`;
+          all.addEventListener("click", () => {
+            typeFilter = "";
+            typeFilterSelect.value = "";
+            renderPool();
+            render();
+          });
+          poolBox.appendChild(all);
+
+          for (const group of groups) {
+            const card = document.createElement("div");
+            card.className =
+              "card" + (group.count === 0 ? " zero" : "") + (typeFilter === group.provider_type ? " active" : "");
+            card.innerHTML = `<div class="t">${group.label}</div><div class="n">${group.count}</div>`;
+            card.title = group.count ? "点击只看这一类引用" : "还没有配置这一类供应商";
+            card.addEventListener("click", () => {
+              typeFilter = toggleType(typeFilter, group.provider_type);
+              typeFilterSelect.value = typeFilter;
+              renderPool();
+              render();
+            });
+            poolBox.appendChild(card);
+          }
+        }
+
+        /** 再点一次同类则取消筛选，方便快速来回切换。 */
+        function toggleType(current, next) {
+          return current === next ? "" : next;
+        }
+
+        /* ---------------- 引用表格 ---------------- */
+
+        function render() {
+          content.innerHTML = "";
+          const visible = refs.filter(isVisible);
+          if (!visible.length) {
+            content.innerHTML = '<div class="empty">当前筛选下没有供应商引用。</div>';
+            updatePending();
+            return;
+          }
+
+          const grouped = new Map();
+          for (const ref of visible) {
+            if (!grouped.has(ref.file)) grouped.set(ref.file, { label: ref.file_label, items: [] });
+            grouped.get(ref.file).items.push(ref);
+          }
+
+          for (const [, group] of grouped) {
+            const section = document.createElement("section");
+            section.className = "group";
+
+            const title = document.createElement("h2");
+            title.innerHTML = `${group.label} <span class="count">${group.items.length} 处</span>`;
+            section.appendChild(title);
+
+            const table = document.createElement("table");
+            table.innerHTML = `<thead><tr>
+              <th style="width:36px"><input type="checkbox" class="group-check" /></th>
+              <th style="width:96px">能力 / 用途</th>
+              <th>字段</th>
+              <th style="width:200px">当前值</th>
+              <th style="width:250px">目标值</th>
+            </tr></thead>`;
+
+            const tbody = document.createElement("tbody");
+            for (const ref of group.items) {
+              const tr = document.createElement("tr");
+              tr.dataset.key = ref.key;
+              tr.dataset.multi = ref.multi ? "1" : "0";
+              if (ref.type_mismatch) tr.classList.add("mismatch");
+
+              const tdCheck = document.createElement("td");
+              const check = document.createElement("input");
+              check.type = "checkbox";
+              check.className = "row-check";
+              tdCheck.appendChild(check);
+              tr.appendChild(tdCheck);
+
+              // 能力类型 + 用途，两个 chip 并排
+              const tdCat = document.createElement("td");
+              const typeChip = document.createElement("span");
+              typeChip.className = "chip t-" + ref.provider_type;
+              typeChip.textContent = ref.provider_type_label;
+              const catChip = document.createElement("span");
+              catChip.className = "chip";
+              catChip.textContent = ref.category_label;
+              catChip.style.marginLeft = "4px";
+              tdCat.appendChild(typeChip);
+              tdCat.appendChild(catChip);
+              if (ref.multi) {
+                const multiChip = document.createElement("span");
+                multiChip.className = "chip";
+                multiChip.textContent = "多值";
+                multiChip.title = "该字段是一个有序数组，可同时选择多个供应商";
+                multiChip.style.marginLeft = "4px";
+                tdCat.appendChild(multiChip);
+              }
+              if (ref.type_mismatch) {
+                const warnChip = document.createElement("span");
+                warnChip.className = "chip warn";
+                warnChip.textContent = "类型不符";
+                warnChip.style.marginLeft = "4px";
+                warnChip.title = `当前值属于「${ref.current_provider_type}」类，但该位置需要「${ref.provider_type}」类`;
+                tdCat.appendChild(warnChip);
+              }
+              tr.appendChild(tdCat);
+
+              const tdPath = document.createElement("td");
+              tdPath.className = "path";
+              tdPath.textContent = ref.path;
+              tdPath.title = ref.file;
+              tr.appendChild(tdPath);
+
+              // 当前值：多值字段逐个列出，单值字段直接显示
+              const tdCur = document.createElement("td");
+              if (ref.multi) {
+                ref.values.forEach((value, index) => {
+                  const item = document.createElement("span");
+                  item.className = "chip";
+                  item.textContent = `${index + 1}. ${value}`;
+                  item.style.marginRight = "4px";
+                  tdCur.appendChild(item);
+                });
+                if (!ref.values.length) tdCur.textContent = "（空）";
+              } else {
+                tdCur.textContent = ref.value;
+              }
+              tr.appendChild(tdCur);
+
+              const pool = providers.filter((p) => p.provider_type === ref.provider_type);
+              const tdTarget = document.createElement("td");
+              const current = currentOf(ref);
+
+              if (ref.multi) {
+                // 多值字段用多选框：本体面板里这个字段也是可多选的
+                const select = document.createElement("select");
+                select.multiple = true;
+                select.size = Math.min(Math.max(pool.length, 2), 5);
+                select.dataset.providerType = ref.provider_type;
+                select.dataset.multi = "1";
+                const selectedSet = new Set(current);
+                for (const provider of pool) {
+                  const label = provider.id + (provider.enable === false ? "（已停用）" : "");
+                  const opt = buildOption(provider.id, label, selectedSet.has(provider.id));
+                  opt.title = `${provider.provider_type_label} · ${typeFromLabel(provider.type_from)}`;
+                  select.appendChild(opt);
+                }
+                // 已选但不在候选池里的（类型变了/供应商被删）单独补一条，避免"悄悄丢掉"
+                for (const value of current) {
+                  if (!pool.some((p) => p.id === value)) {
+                    select.appendChild(buildOption(value, value + "（类型或供应商不符）", true));
+                  }
+                }
+                select.addEventListener("change", () => {
+                  const picked = Array.from(select.selectedOptions).map((opt) => opt.value);
+                  // 保持原有顺序，新选的追加在后面：回退顺序不会被莫名打乱
+                  const ordered = current.filter((value) => picked.includes(value));
+                  for (const value of picked) {
+                    if (!ordered.includes(value)) ordered.push(value);
+                  }
+                  choices.set(ref.key, ordered);
+                  tr.classList.toggle("changed", isDirty(ref));
+                  countHint.textContent = `已选 ${ordered.length} 个`;
+                  updatePending();
+                });
+                tdTarget.appendChild(select);
+                const hint = document.createElement("div");
+                hint.className = "multi-hint";
+                const countHint = document.createElement("span");
+                countHint.textContent = `已选 ${current.length} 个`;
+                hint.appendChild(countHint);
+                hint.appendChild(
+                  document.createTextNode(" · 按住 Ctrl 点选可多选；顺序即回退优先级，取消全部即清空")
+                );
+                tdTarget.appendChild(hint);
+              } else {
+                // 单值字段用普通下拉
+                const select = document.createElement("select");
+                select.dataset.providerType = ref.provider_type;
+                for (const provider of pool) {
+                  const label = provider.id + (provider.enable === false ? "（已停用）" : "");
+                  const opt = buildOption(provider.id, label, provider.id === current);
+                  // 悬停说明这个供应商的类型是哪儿来的（与本体面板同源）
+                  opt.title = `${provider.provider_type_label} · ${typeFromLabel(provider.type_from)}${
+                    provider.model ? " · " + provider.model : ""
+                  }`;
+                  select.appendChild(opt);
+                }
+                if (!pool.some((p) => p.id === current)) {
+                  select.appendChild(buildOption(current, current + "（类型或供应商不符）", true));
+                }
+                select.addEventListener("change", () => {
+                  choices.set(ref.key, select.value);
+                  tr.classList.toggle("changed", isDirty(ref));
+                  updatePending();
+                });
+                tdTarget.appendChild(select);
+              }
+              tr.appendChild(tdTarget);
+
+              if (isDirty(ref)) tr.classList.add("changed");
+              tbody.appendChild(tr);
+            }
+            table.appendChild(tbody);
+            section.appendChild(table);
+
+            const groupCheck = table.querySelector(".group-check");
+            groupCheck.addEventListener("change", () => {
+              table.querySelectorAll(".row-check").forEach((cb) => {
+                cb.checked = groupCheck.checked;
+              });
+            });
+
+            content.appendChild(section);
+          }
+          updatePending();
+        }
+
+        /* ---------------- 批量设置：按五类分组的下拉 ---------------- */
+
+        function fillBulkSelect() {
+          const previous = bulkSelect.value;
+          bulkSelect.innerHTML = "";
+          bulkSelect.appendChild(buildOption("", "选择供应商…", !previous));
+          for (const group of groups) {
+            if (!group.count) continue;
+            const optGroup = document.createElement("optgroup");
+            optGroup.label = `${group.label}（${group.count}）`;
+            for (const provider of group.items) {
+              optGroup.appendChild(
+                buildOption(provider.id, provider.id + (provider.enable === false ? "（已停用）" : ""), false)
+              );
+            }
+            bulkSelect.appendChild(optGroup);
+          }
+          if (previous) bulkSelect.value = previous;
+        }
+
+        function applyBulk() {
+          const target = bulkSelect.value;
+          if (!target) {
+            log("请先在「批量设为」里选一个供应商。", "err");
+            return;
+          }
+          const targetProvider = providers.find((p) => p.id === target);
+          const targetType = targetProvider ? targetProvider.provider_type : "";
+          let touched = 0;
+          let skipped = 0;
+          let multiSkipped = 0;
+          content.querySelectorAll("tbody tr").forEach((tr) => {
+            const check = tr.querySelector(".row-check");
+            if (!check || !check.checked) return;
+            const select = tr.querySelector("select");
+            if (!select) return;
+            // 多值行（回退对话模型这类有序数组）不参与批量覆盖，只能在行内自己多选
+            if (tr.dataset.multi === "1") {
+              multiSkipped += 1;
+              return;
+            }
+            // 跨类不覆盖：目标供应商的类型与该位置要求不一致就跳过
+            if (select.dataset.providerType && select.dataset.providerType !== targetType) {
+              skipped += 1;
+              return;
+            }
+            select.value = target;
+            choices.set(tr.dataset.key, target);
+            touched += 1;
+            tr.classList.toggle("changed", target !== refByKey(tr.dataset.key).value);
+          });
+          updatePending();
+          let msg = `已把 ${touched} 行的目标值设为 <b>${target}</b>，确认无误后点「一键同步」。`;
+          if (skipped) msg += ` 跳过 ${skipped} 行（类型不同，不会跨类覆盖）。`;
+          if (multiSkipped) {
+            msg += ` 有 ${multiSkipped} 行是多值字段（如回退对话模型），请在该行多选框里自行勾选。`;
+          }
+          log(msg, "ok");
+        }
+
+        function refByKey(key) {
+          return refs.find((ref) => ref.key === key) || { value: "", values: [] };
+        }
+
+        /* ---------------- 同步 ---------------- */
+
+        async function sync() {
+          const changes = [];
+          for (const ref of refs) {
+            if (!isVisible(ref)) continue;
+            if (!isDirty(ref)) continue;
+            const change = {
+              file: ref.file,
+              path: ref.path,
+              conf_id: ref.conf_id,
+              plugin_id: ref.plugin_id,
+              provider_type: ref.provider_type,
+            };
+            if (ref.multi) change.values = currentOf(ref);
+            else change.value = currentOf(ref);
+            changes.push(change);
+          }
+          if (!changes.length) {
+            log("没有需要同步的改动。", "err");
+            return;
+          }
+          const btn = el("sync");
+          btn.disabled = true;
+          btn.textContent = "同步中…";
+          clearLog();
+          try {
+            const { data } = unwrap(await apiPost("apply", { changes: changes }));
+            const applied = (data.applied || []).length;
+            const failed = data.failed || [];
+            const rejected = data.rejected || [];
+            if (!failed.length && !rejected.length) {
+              log(`✔ 已同步 ${applied} 处。`, "ok");
+            } else {
+              log(`⚠ 已同步 ${applied} 处，失败 ${failed.length} 处，拒绝 ${rejected.length} 处。`, "err");
+            }
+            if (data.backup) log(`原配置已备份到：${data.backup}`);
+            for (const item of failed) {
+              log(`✘ ${item.file} · ${item.path} → ${item.error}`, "err");
+            }
+            for (const item of rejected) {
+              log(`✘ ${item.file} · ${item.path} → ${item.reason}`, "err");
+            }
+            await load(true);
+          } catch (err) {
+            log("同步失败：" + (err && err.message ? err.message : String(err)), "err");
+          } finally {
+            btn.disabled = false;
+            btn.textContent = "一键同步";
+          }
+        }
+
+        /* ---------------- 加载 ---------------- */
+
+        async function load(silent) {
+          if (loading) return;
+          loading = true;
+          rescanBtn.disabled = true;
+          rescanBtn.textContent = "扫描中…";
+          if (!silent) {
+            content.innerHTML = '<div class="empty">正在扫描配置…</div>';
+            clearLog();
+          }
+          try {
+            const { data } = unwrap(await apiGet("state", {}));
+            refs = data.refs || [];
+            providers = data.providers || [];
+            groups = data.provider_groups || [];
+            typeOrder = data.provider_type_order || typeOrder;
+            typeLabels = data.provider_type_labels || typeLabels;
+            choices = new Map(refs.map((ref) => [ref.key, ref.value]));
+
+            // 筛选下拉按五类填充
+            typeFilterSelect.innerHTML = "";
+            typeFilterSelect.appendChild(buildOption("", "全部类型", true));
+            for (const key of typeOrder) {
+              typeFilterSelect.appendChild(buildOption(key, typeLabels[key] || key, false));
+            }
+            typeFilterSelect.value = typeFilter;
+
+            renderPool();
+            render();
+            fillBulkSelect();
+            scannedBox.textContent = data.scanned_at ? `上次扫描 ${data.scanned_at}` : "";
+            if (!silent) {
+              const summary = data.summary || {};
+              const mix = summary.mismatch ? `，其中 ${summary.mismatch} 处类型不符` : "";
+              const skipped = summary.skipped_agent_runner
+                ? `（另有 ${summary.skipped_agent_runner} 个 Agent 执行器条目，本体面板不列出，这里同样跳过）`
+                : "";
+              log(
+                `扫描完成：供应商 ${summary.provider_total || providers.length} 个，引用 ${summary.total || refs.length} 处${mix}${skipped}。`,
+                "ok"
+              );
+              renderCoreCheck(data.core_check);
+            }
+          } catch (err) {
+            content.innerHTML = `<div class="empty">扫描失败：${
+              err && err.message ? err.message : String(err)
+            }</div>`;
+            scannedBox.textContent = "";
+          } finally {
+            loading = false;
+            rescanBtn.disabled = false;
+            rescanBtn.textContent = "重新扫描";
+          }
+        }
+
+        /** 与核心内存里的供应商列表对账：不一致说明手改过文件或核心还没重载。 */
+        function renderCoreCheck(check) {
+          if (!check) return;
+          if (!check.checked) {
+            log(`未能与核心对账（${check.error || "接口不可用"}），分类以磁盘配置为准。`);
+            return;
+          }
+          const onlyCore = check.only_in_core || [];
+          const onlyDisk = check.only_on_disk || [];
+          if (!onlyCore.length && !onlyDisk.length) {
+            log(`已与本体「模型提供商」对账：${check.core_total} 个供应商，两边一致。`, "ok");
+            return;
+          }
+          log(
+            `⚠ 与核心内存不一致：仅核心有 ${onlyCore.length} 个${onlyCore.length ? "（" + onlyCore.slice(0, 3).join("、") + "…）" : ""}，` +
+              `仅磁盘有 ${onlyDisk.length} 个${onlyDisk.length ? "（" + onlyDisk.slice(0, 3).join("、") + "…）" : ""}。` +
+              `手改过配置文件的话，请在桌面端重启一次核心再重新扫描。`,
+            "err"
+          );
+        }
+
+        /* ---------------- 事件绑定 ---------------- */
+
+        typeFilterSelect.addEventListener("change", (event) => {
+          typeFilter = event.target.value;
+          renderPool();
+          render();
+        });
+        rescanBtn.addEventListener("click", () => load(false));
+        el("bulk-apply").addEventListener("click", applyBulk);
+        el("select-all").addEventListener("click", () => {
+          content.querySelectorAll(".row-check").forEach((cb) => (cb.checked = true));
+        });
+        el("select-none").addEventListener("click", () => {
+          content.querySelectorAll(".row-check").forEach((cb) => (cb.checked = false));
+          content.querySelectorAll(".group-check").forEach((cb) => (cb.checked = false));
+        });
+        el("show-voice").addEventListener("change", (event) => {
+          showVoice = event.target.checked;
+          render();
+        });
+        el("sync").addEventListener("click", sync);
+
+        (async function boot() {
+          // 桥接脚本可能晚于本脚本执行，先等它出现，再等父窗口把上下文推过来。
+          const bridge = await waitBridge();
+          if (bridge && typeof bridge.ready === "function") {
+            try {
+              await Promise.race([bridge.ready(), sleep(1500)]);
+            } catch (err) {
+              /* 忽略：父窗口没推上下文也不影响接口调用 */
+            }
+          }
+          await load(false);
+        })();
+      })();
+    </script>
+  </body>
+</html>

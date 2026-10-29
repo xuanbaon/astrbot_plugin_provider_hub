@@ -1,0 +1,7 @@
+{
+  "enabled": {
+    "type": "bool",
+    "default": true,
+    "description": "启用供应商统一管理页面（关闭后仍可在插件页手动打开，仅作标记用）"
+  }
+}

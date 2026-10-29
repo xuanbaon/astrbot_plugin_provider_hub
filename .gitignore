@@ -1,0 +1,15 @@
+# 运行时目录（插件会把备份与同步历史写在这里，不入库）
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

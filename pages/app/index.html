@@ -76,6 +76,51 @@
       .pool .card .t { font-size: 12px; color: var(--muted); }
       .pool .card .n { font-size: 20px; font-weight: 600; }
       .pool .card.zero .n { color: var(--muted); }
+
+      /* 配置清单：一次列出扫描到的所有范围，点一下即筛选 */
+      .profile-bar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px;
+        margin: 0 0 14px;
+      }
+      .profile-bar .pb-title {
+        font-size: 12px;
+        color: var(--muted);
+        margin-right: 2px;
+      }
+      .profile-bar .pf {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 3px 10px;
+        font: inherit;
+        font-size: 12px;
+        line-height: 1.5;
+        color: var(--fg);
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        background: var(--panel);
+        cursor: pointer;
+      }
+      .profile-bar .pf:hover { border-color: var(--accent); }
+      .profile-bar .pf.active {
+        border-color: var(--accent);
+        box-shadow: inset 0 0 0 1px var(--accent);
+        color: var(--accent);
+        font-weight: 600;
+      }
+      .profile-bar .pf .cnt { color: var(--muted); font-weight: 400; }
+      .profile-bar .pf.active .cnt { color: var(--accent); }
+      .profile-bar .pf.zero .cnt { opacity: 0.6; }
+      .profile-bar .pf .kind {
+        font-size: 10px;
+        font-weight: 400;
+        color: var(--muted);
+        border-left: 1px solid var(--border);
+        padding-left: 6px;
+      }
       .toolbar {
         display: flex;
         flex-wrap: wrap;
@@ -262,7 +307,8 @@
         分类口径与 AstrBot 本体「模型提供商」面板一致：条目声明的类型 → 继承所属
         provider_sources 的类型 → 兜底「对话」。顶部「配置文件」下拉与本体一致——
         默认配置、用户自建的会话配置档、插件配置分开展示，选定后只列该配置里的引用，
-        改完统一写回。选「全部配置文件」则一次查看所有范围。
+        改完统一写回。选「全部配置文件」则一次查看所有范围；表格上方那排配置清单
+        把扫描到的每个范围连同处数一起列出，点一下即筛选，和下拉是同一个状态。
       </p>
     </header>
 
@@ -297,6 +343,8 @@
       <span id="pending">待同步 0 处</span>
       <button id="sync" class="primary" type="button">一键同步</button>
     </div>
+
+    <div class="profile-bar" id="profile-bar"></div>
 
     <main id="content"><div class="empty">正在扫描配置…</div></main>
     <div class="log" id="log"></div>
@@ -353,6 +401,7 @@
         const bulkSelect = el("bulk-target");
         const typeFilterSelect = el("type-filter");
         const profileFilterSelect = el("profile-filter");
+        const profileBar = el("profile-bar");
         const poolBox = el("pool");
         const rescanBtn = el("rescan");
         const copyModal = el("copy-modal");
@@ -447,6 +496,59 @@
           if (from === "entry") return "条目自己声明的类型";
           if (from === "source") return "继承自 provider_sources";
           return "未声明类型，按对话处理";
+        }
+
+        /** 切换配置文件筛选：下拉与配置清单一并更新，两边永远同一个状态。 */
+        function setProfileFilter(value) {
+          profileFilter = value;
+          if (profileFilterSelect.value !== value) profileFilterSelect.value = value;
+          renderProfileBar();
+          render();
+        }
+
+        /** 配置清单：扫描到的每个范围都列成一枚胶囊，点一下即筛选。 */
+        function renderProfileBar() {
+          if (!profileBar) return;
+          const items = [{ value: "all", label: "全部", count: refs.length, kind: "所有范围" }];
+          for (const profile of profiles) {
+            items.push({
+              value: profile.id,
+              label: profile.label,
+              count: profile.ref_count || 0,
+              kind: profile.is_default ? "默认" : "配置档",
+            });
+          }
+          const pluginCount = refs.filter((ref) => !ref.conf_id).length;
+          if (pluginCount || profileFilter === "plugin") {
+            items.push({ value: "plugin", label: "插件配置", count: pluginCount, kind: "各插件" });
+          }
+
+          profileBar.innerHTML = "";
+          const title = document.createElement("span");
+          title.className = "pb-title";
+          title.textContent = "扫描到的配置";
+          profileBar.appendChild(title);
+
+          for (const item of items) {
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "pf" + (item.value === profileFilter ? " active" : "");
+            if (!item.count) btn.classList.add("zero");
+            btn.dataset.value = item.value;
+            btn.title = item.count
+              ? `${item.label}：${item.count} 处供应商引用，点击只看这个配置`
+              : `${item.label}：目前没有供应商引用，点击查看`;
+            const name = document.createElement("span");
+            name.textContent = item.label;
+            const cnt = document.createElement("span");
+            cnt.className = "cnt";
+            cnt.textContent = `${item.count} 处`;
+            const kind = document.createElement("span");
+            kind.className = "kind";
+            kind.textContent = item.kind;
+            btn.append(name, cnt, kind);
+            profileBar.appendChild(btn);
+          }
         }
 
         /** 某一行在当前筛选下是否显示（只影响显示，不影响提交）。 */
@@ -1214,6 +1316,7 @@
             );
             if (!stillThere) profileFilter = "all";
             profileFilterSelect.value = profileFilter;
+            renderProfileBar();
 
             lastOp = data.last_op || null;
             updateUndoButton();
@@ -1270,8 +1373,11 @@
         /* ---------------- 事件绑定 ---------------- */
 
         profileFilterSelect.addEventListener("change", (event) => {
-          profileFilter = event.target.value;
-          render();
+          setProfileFilter(event.target.value);
+        });
+        profileBar.addEventListener("click", (event) => {
+          const btn = event.target.closest(".pf");
+          if (btn && btn.dataset.value !== undefined) setProfileFilter(btn.dataset.value);
         });
         typeFilterSelect.addEventListener("change", (event) => {
           typeFilter = event.target.value;

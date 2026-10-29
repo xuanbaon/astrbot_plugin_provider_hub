@@ -68,7 +68,7 @@ from astrbot.api import logger
 from astrbot.api.star import Context, Star, register
 
 PLUGIN_NAME = "provider_hub"
-PLUGIN_VERSION = "1.5.1"
+PLUGIN_VERSION = "1.6.0"
 
 # ---------------------------------------------------------------- 目录约定
 # main.py 位于 <data>/plugins/astrbot_plugin_provider_hub/，parents[2] 即 data 目录。
@@ -567,9 +567,25 @@ def _build_profiles(refs: list[dict], live: list[dict]) -> list[dict]:
         counts[conf_id] = counts.get(conf_id, 0) + 1
         files.setdefault(conf_id, ref["file"])
 
+    # 默认配置 + 所有在线配置档都要进清单，哪怕当前 0 处引用：
+    # 刚建好还没配供应商的配置档也得看得见，否则用户以为扫描漏了它。
+    ordered: list[str] = ["default"]
+    for item in live:
+        conf_id = str(item.get("id") or "")
+        if conf_id and conf_id not in ordered:
+            ordered.append(conf_id)
+    for conf_id in files:
+        if conf_id not in ordered:
+            ordered.append(conf_id)
+
     profiles: list[dict] = []
-    for conf_id, file in files.items():
+    for conf_id in ordered:
         raw_name = names.get(conf_id, "")
+        file = files.get(conf_id) or (
+            "cmd_config.json"
+            if conf_id == "default"
+            else f"config/abconf_{conf_id}.json"
+        )
         if conf_id == "default":
             label = "默认配置文件"
             if raw_name and raw_name != "default":
@@ -583,7 +599,7 @@ def _build_profiles(refs: list[dict], live: list[dict]) -> list[dict]:
                 "label": label,
                 "file": file,
                 "is_default": conf_id == "default",
-                "ref_count": counts[conf_id],
+                "ref_count": counts.get(conf_id, 0),
             }
         )
     profiles.sort(key=lambda item: (not item["is_default"], item["label"]))

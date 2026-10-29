@@ -1055,7 +1055,6 @@
         function updateUndoButton() {
           if (!lastOp) {
             undoBtn.title = "暂无可撤回的操作：只记录本页面的「一键同步」和「复制配置」";
-            undoBtn.classList.remove("armed");
             return;
           }
           undoBtn.title = `撤回：${describeLastOp(lastOp)}（${lastOp.time || "时间未知"}）`;

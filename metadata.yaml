@@ -1,5 +1,5 @@
 name: provider_hub
-display_name: 供应商统一管理
+display_name: 模型提供商统一管理
 short_desc: 按五类能力扫描核心与所有插件配置里的模型供应商引用，一处修改、一键同步
 desc: >-
   解决「改了 AstrBot 主配置的供应商，插件里还指着旧供应商」的问题。
@@ -24,9 +24,12 @@ desc: >-
   「查询余额」按供应商来源（一把 key + 一个地址）查询账户余额，只读、不改配置、
   不消耗额度：DeepSeek、硅基流动、Moonshot、OpenRouter 与 OpenAI 兼容账单接口
   （OneAPI / NewAPI 系中转站）都能查；没有开放接口的会写明原因而不是报错。
+  「＋ 添加提供商」（或各能力卡片右上角的 ＋）可以直接在某一类里新增提供商：
+  类型与字段取自本体的提供商模板，对话类建「来源 + 模型条目」，语音、嵌入、重排序
+  建自包含条目，写盘后当场生效、不用重启；新增也能用「撤回上一步」删掉。
   页面提供「重新扫描」按钮，随时按本体最新配置刷新；
-  不启动任何常驻监听进程，只在点击同步、复制、撤回或查询余额时工作。
-version: 1.8.0
+  不启动任何常驻监听进程，只在点击同步、复制、撤回、查询余额或添加时工作。
+version: 1.9.0
 author: xuanbaon
 repo: "https://github.com/xuanbaon/astrbot_plugin_provider_hub"
 astrbot_version: ">=4.17.0"

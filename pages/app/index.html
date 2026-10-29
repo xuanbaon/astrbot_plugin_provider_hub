@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>供应商统一管理</title>
+    <title>模型提供商统一管理</title>
     <style>
       :root {
         --bg: #ffffff;
@@ -73,9 +73,28 @@
       }
       .pool .card:hover { border-color: var(--accent); }
       .pool .card.active { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
-      .pool .card .t { font-size: 12px; color: var(--muted); }
+      .pool .card .t { font-size: 12px; color: var(--muted); display: flex; align-items: center; justify-content: space-between; gap: 6px; }
       .pool .card .n { font-size: 20px; font-weight: 600; }
       .pool .card.zero .n { color: var(--muted); }
+      /* 每类卡片右上角的小加号：直接在该类别里添加提供商 */
+      .add-mini {
+        flex: none;
+        width: 20px;
+        height: 20px;
+        padding: 0;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font: inherit;
+        font-size: 13px;
+        line-height: 1;
+        color: var(--muted);
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        cursor: pointer;
+      }
+      .add-mini:hover { color: var(--accent); border-color: var(--accent); }
 
       /* 配置清单：一次列出扫描到的所有范围，点一下即筛选 */
       .profile-bar {
@@ -297,6 +316,45 @@
 
       /* 余额弹层：一行一个来源，左边名字右边钱 */
       .modal-box.wide { width: min(760px, 100%); }
+
+      /* 添加提供商弹层 */
+      .add-cats { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 14px; }
+      .add-cats button {
+        padding: 4px 12px;
+        font: inherit;
+        font-size: 12px;
+        line-height: 1.5;
+        color: var(--fg);
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        cursor: pointer;
+      }
+      .add-cats button:hover { border-color: var(--accent); }
+      .add-cats button.active {
+        color: var(--accent);
+        border-color: var(--accent);
+        box-shadow: inset 0 0 0 1px var(--accent);
+        font-weight: 600;
+      }
+      .add-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 16px; }
+      .add-grid label { margin-bottom: 8px; }
+      .add-grid label .k { flex: none; min-width: 72px; color: var(--muted); }
+      .add-grid label input { flex: 1; min-width: 0; }
+      @media (max-width: 620px) { .add-grid { grid-template-columns: 1fr; } }
+      .modal-box input[type="text"],
+      .modal-box input[type="password"],
+      .modal-box input[type="number"] {
+        padding: 5px 8px;
+        font: inherit;
+        font-size: 13px;
+        color: var(--fg);
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+      }
+      .modal-box input:focus { outline: none; border-color: var(--accent); }
+      .modal-box input:disabled { opacity: 0.6; }
       .bal-head {
         display: flex;
         align-items: center;
@@ -377,7 +435,7 @@
   </head>
   <body>
     <header>
-      <h1>供应商统一管理</h1>
+      <h1>模型提供商统一管理</h1>
       <p class="sub">
         分类口径与 AstrBot 本体「模型提供商」面板一致：条目声明的类型 → 继承所属
         provider_sources 的类型 → 兜底「对话」。顶部「配置文件」下拉与本体一致——
@@ -396,14 +454,18 @@
       「复制配置…」把某个配置里的供应商设置整份搬到另一个配置（只动供应商字段，
       复制前自动备份目标）；分组标题点一下就能收起/展开，配置多时不必反复滚动。
       「查询余额」按来源查各家的账户余额，只读不写盘。
+      「＋ 添加提供商」（或各能力卡片右上角的 ＋）能直接新增：类型取自本体的提供商模板，
+      对话类建「来源 + 模型条目」，其余类别建自包含条目，写盘后当场生效、不用重启。
       万一手滑复制错了配置，点「撤回上一步」整份还原到操作前，可以连点多次逐步往回退；
       撤多了就点「恢复」退回来（快捷键 Ctrl+Y，撤回是 Ctrl+Z，Mac 用 ⌘）。
+      新增的撤回是把新建的东西删掉，这种操作不支持「恢复」。
     </div>
 
     <div class="pool" id="pool"></div>
 
     <div class="toolbar">
       <button id="rescan" type="button" title="重新读取配置并分类（只读，不写盘）">重新扫描</button>
+      <button id="add-btn" type="button" title="新增提供商：与本体的「模型提供商」面板同一套类型与字段">＋ 添加提供商</button>
       <button id="copy-btn" type="button" title="把一个配置里的供应商设置整体复制到另一个配置">复制配置…</button>
       <button id="undo-btn" type="button" title="撤回最近一次同步或复制">撤回上一步</button>
       <button id="redo-btn" type="button" title="恢复：把刚才撤回的内容放回去">恢复</button>
@@ -427,6 +489,32 @@
 
     <main id="content"><div class="empty">正在扫描配置…</div></main>
     <div class="log" id="log"></div>
+
+    <div class="modal" id="add-modal" hidden>
+      <div class="modal-box wide">
+        <h3>添加提供商</h3>
+        <p>
+          提供商类型取自本体的「模型提供商」面板。先选类别与类型，再填地址和密钥。
+          <b>对话类</b>会建一个「来源」（一套地址 + 密钥，可挂多个模型），
+          其余类别直接建自包含条目——和本体新增时一样。
+        </p>
+        <div class="add-cats" id="add-cats"></div>
+        <div class="add-grid">
+          <label><span class="k">提供商类型</span><select id="add-template"></select></label>
+          <label><span class="k">名称</span><input id="add-name" type="text" placeholder="例如 my-moonshot" /></label>
+          <label><span class="k">API Base</span><input id="add-base" type="text" placeholder="https://…/v1" /></label>
+          <label><span class="k">API Key</span><input id="add-key" type="password" placeholder="本地部署可留空" /></label>
+          <label id="add-model-row"><span class="k">模型</span><input id="add-model" type="text" placeholder="例如 gpt-4o-mini" /></label>
+          <label><span class="k">超时（秒）</span><input id="add-timeout" type="number" min="1" step="1" value="120" /></label>
+          <label><span class="k">代理</span><input id="add-proxy" type="text" placeholder="可留空，例如 http://127.0.0.1:7890" /></label>
+        </div>
+        <div class="modal-hint" id="add-hint"></div>
+        <div class="modal-actions">
+          <button id="add-cancel" type="button">取消</button>
+          <button id="add-run" class="primary" type="button">添加</button>
+        </div>
+      </div>
+    </div>
 
     <div class="modal" id="undo-modal" hidden>
       <div class="modal-box">
@@ -509,6 +597,8 @@
         let balances = {};
         let balancing = false;
         let loading = false;
+        let templates = null;          // 本体各类型的提供商模板（懒加载）
+        let addCategory = "chat_completion";
 
         const el = (id) => document.getElementById(id);
         const content = el("content");
@@ -541,6 +631,19 @@
         const balanceList = el("balance-list");
         const balanceTime = el("balance-time");
         const balanceRefresh = el("balance-refresh");
+        const addBtn = el("add-btn");
+        const addModal = el("add-modal");
+        const addCatsBox = el("add-cats");
+        const addTemplateSelect = el("add-template");
+        const addNameInput = el("add-name");
+        const addBaseInput = el("add-base");
+        const addKeyInput = el("add-key");
+        const addModelInput = el("add-model");
+        const addModelRow = el("add-model-row");
+        const addTimeoutInput = el("add-timeout");
+        const addProxyInput = el("add-proxy");
+        const addHintBox = el("add-hint");
+        const addRunBtn = el("add-run");
 
         /* ---------------- 后端调用 ----------------
          * 本页跑在 WebUI 的沙箱 iframe 里（sandbox 未给 allow-same-origin，
@@ -744,7 +847,10 @@
             const card = document.createElement("div");
             card.className =
               "card" + (group.count === 0 ? " zero" : "") + (typeFilter === group.provider_type ? " active" : "");
-            card.innerHTML = `<div class="t">${group.label}</div><div class="n">${group.count}</div>`;
+            card.innerHTML =
+              `<div class="t"><span>${group.label}</span>` +
+              `<button class="add-mini" type="button" title="在「${group.label}」里添加提供商">＋</button></div>` +
+              `<div class="n">${group.count}</div>`;
             card.title = group.count ? "点击只看这一类引用" : "还没有配置这一类供应商";
             card.addEventListener("click", () => {
               typeFilter = toggleType(typeFilter, group.provider_type);
@@ -752,6 +858,13 @@
               renderPool();
               render();
             });
+            const addMini = card.querySelector(".add-mini");
+            if (addMini) {
+              addMini.addEventListener("click", (event) => {
+                event.stopPropagation();
+                openAdd(group.provider_type);
+              });
+            }
             poolBox.appendChild(card);
           }
         }
@@ -759,6 +872,194 @@
         /** 再点一次同类则取消筛选，方便快速来回切换。 */
         function toggleType(current, next) {
           return current === next ? "" : next;
+        }
+
+        /* ---------------- 添加提供商 ----------------
+         * 类型与字段全部取自本体的模板表（`templates` 接口转发 /api/v1/providers/schema），
+         * 写回也走本体接口：对话类建「来源 + 模型条目」，其余类别建自包含条目。
+         * 这样新增出来的东西和在本体「模型提供商」面板里加的一模一样。
+         */
+
+        function addGroups() {
+          return (templates && templates.groups) || [];
+        }
+
+        function addItems(category) {
+          const group = addGroups().find((item) => item.provider_type === category);
+          return (group && group.items) || [];
+        }
+
+        async function ensureTemplates() {
+          if (templates) return templates;
+          const { data } = unwrap(await apiGet("templates"));
+          templates = data;
+          return templates;
+        }
+
+        function addHint(text, warn) {
+          addHintBox.textContent = text || "";
+          addHintBox.className = "modal-hint" + (warn ? " warn" : "");
+        }
+
+        function renderAddCats() {
+          addCatsBox.innerHTML = "";
+          for (const group of addGroups()) {
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = group.provider_type === addCategory ? "active" : "";
+            btn.textContent = `${group.label}（${group.items.length}）`;
+            btn.title = `在「${group.label}」里添加提供商`;
+            btn.addEventListener("click", () => {
+              addCategory = group.provider_type;
+              renderAddCats();
+              renderAddTemplates();
+            });
+            addCatsBox.appendChild(btn);
+          }
+        }
+
+        /** 模板里「地址 / 模型」的字段名各类别不同，取第一个非空值。 */
+        function firstOf(obj, keys) {
+          for (const key of keys) {
+            const value = obj[key];
+            if (typeof value === "string" && value.trim()) return value.trim();
+            if (typeof value === "number") return value;
+          }
+          return "";
+        }
+
+        function currentTemplate() {
+          const label = addTemplateSelect.value;
+          return addItems(addCategory).find((item) => item.label === label) || null;
+        }
+
+        function applyTemplateDefaults() {
+          const tmpl = currentTemplate();
+          const defaults = (tmpl && tmpl.defaults) || {};
+          addBaseInput.value = firstOf(defaults, ["api_base", "embedding_api_base", "rerank_api_base"]);
+          addModelInput.value = firstOf(defaults, ["model", "embedding_model", "rerank_model"]);
+          addTimeoutInput.value = firstOf(defaults, ["timeout"]) || 120;
+          addProxyInput.value = "";
+          const chat = addCategory === "chat_completion";
+          addModelInput.placeholder = chat
+            ? "可留空：只建来源，稍后在本体里补模型"
+            : "这一类的模型名";
+          addModelRow.title = chat
+            ? "填了就同时建一条模型条目（id 为「名称/模型」）"
+            : "模板自带的模型名，可按需修改";
+        }
+
+        function renderAddTemplates() {
+          addTemplateSelect.innerHTML = "";
+          const items = addItems(addCategory);
+          if (!items.length) {
+            addTemplateSelect.appendChild(buildOption("", "（这一类没有可选类型）", true));
+            addTemplateSelect.disabled = true;
+            applyTemplateDefaults();
+            updateAddHint();
+            return;
+          }
+          addTemplateSelect.disabled = false;
+          for (const item of items) {
+            addTemplateSelect.appendChild(buildOption(item.label, item.label, false));
+          }
+          addTemplateSelect.value = items[0].label;
+          applyTemplateDefaults();
+          updateAddHint();
+        }
+
+        function updateAddHint() {
+          const tmpl = currentTemplate();
+          if (!tmpl) {
+            addHint("这一类暂时没有可选模板，换一个类别试试。", true);
+            return;
+          }
+          const chat = addCategory === "chat_completion";
+          addHint(
+            chat
+              ? "对话类：先建来源「名称」，再建模型条目「名称/模型」。同一来源下的多个模型共用这把 key，余额也只算一份。"
+              : `这一类不经过来源：密钥与地址直接写在条目「名称」上（类型 ${tmpl.type}）。`,
+            false
+          );
+        }
+
+        function tabLabel(providerType) {
+          return typeLabels[providerType] || providerType;
+        }
+
+        async function openAdd(category) {
+          addCategory = category || "chat_completion";
+          try {
+            await ensureTemplates();
+          } catch (err) {
+            log("读取提供商类型失败：" + (err && err.message ? err.message : String(err)), "err");
+            return;
+          }
+          addNameInput.value = "";
+          addKeyInput.value = "";
+          addModal.hidden = false;
+          renderAddCats();
+          renderAddTemplates();
+          addNameInput.focus();
+        }
+
+        function closeAdd() {
+          addModal.hidden = true;
+        }
+
+        function escapeText(text) {
+          return String(text == null ? "" : text).replace(/[&<>"]/g, (ch) => (
+            { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch]
+          ));
+        }
+
+        async function runAdd() {
+          const name = addNameInput.value.trim();
+          const apiBase = addBaseInput.value.trim();
+          const template = addTemplateSelect.value;
+          if (!template) {
+            addHint("请先选择一个提供商类型", true);
+            return;
+          }
+          if (!name) {
+            addHint("名称不能为空（它就是来源 / 条目的 id）", true);
+            addNameInput.focus();
+            return;
+          }
+          if (!apiBase) {
+            addHint("API Base 不能为空", true);
+            addBaseInput.focus();
+            return;
+          }
+
+          addRunBtn.disabled = true;
+          addRunBtn.textContent = "添加中…";
+          clearLog();
+          try {
+            const { data } = unwrap(
+              await apiPost("add", {
+                category: addCategory,
+                template,
+                name,
+                api_base: apiBase,
+                key: addKeyInput.value.trim(),
+                model: addModelInput.value.trim(),
+                timeout: addTimeoutInput.value,
+                proxy: addProxyInput.value.trim(),
+              })
+            );
+            log(`✔ 已新增「${escapeText(name)}」（${escapeText(tabLabel(addCategory))}）`, "ok");
+            if (data.source_id) log(`来源：${escapeText(data.source_id)}`);
+            for (const id of data.provider_ids || []) log(`条目：${escapeText(id)}`);
+            for (const note of data.notes || []) log(escapeText(note));
+            closeAdd();
+            await load(true);
+          } catch (err) {
+            addHint("添加失败：" + (err && err.message ? err.message : String(err)), true);
+          } finally {
+            addRunBtn.disabled = false;
+            addRunBtn.textContent = "添加";
+          }
         }
 
         /* ---------------- 分组收起/展开 ----------------
@@ -1282,13 +1583,14 @@
           if (op.kind === "redo") {
             return `恢复「${op.summary || "上一次撤回"}」`;
           }
+          // 新增：summary 本身就是「新增「xx」（类别）」这种描述，直接用
           return op.summary || "一次同步";
         }
 
         function updateUndoButton() {
           if (!lastOp) {
             undoBtn.disabled = true;
-            undoBtn.title = "暂无可撤回的操作：只记录本页面的「一键同步」和「复制配置」";
+            undoBtn.title = "暂无可撤回的操作：只记录本页面的「一键同步」「复制配置」和「添加提供商」";
             return;
           }
           undoBtn.disabled = false;
@@ -1297,7 +1599,7 @@
 
         function openUndo() {
           if (!lastOp) {
-            log("没有可撤回的操作：只记录本页面上的「一键同步」和「复制配置」。", "err");
+            log("没有可撤回的操作：只记录本页面上的「一键同步」「复制配置」和「添加提供商」。", "err");
             return;
           }
           undoDesc.textContent = "";
@@ -1309,7 +1611,9 @@
           );
           undoHint.className = "modal-hint";
           undoHint.textContent =
-            "撤回会把那次操作涉及的配置文件整份还原成操作前的样子，其他文件不动；还原前也会再把当前状态备份一份。";
+            lastOp.kind === "add"
+              ? "这一步是新增提供商：撤回会把当时新建的来源 / 条目删掉（不会动别的配置）。新增不支持「恢复」，需要时重新添加即可。"
+              : "撤回会把那次操作涉及的配置文件整份还原成操作前的样子，其他文件不动；还原前也会再把当前状态备份一份。";
           undoModal.hidden = false;
         }
 
@@ -1324,11 +1628,21 @@
           try {
             const { data } = unwrap(await apiPost("undo", {}));
             const restored = data.restored || [];
-            log(`✔ 已还原 ${restored.length} 个配置文件。`, "ok");
-            for (const item of restored) log(`${item.file} → 已还原`);
+            const removed = data.removed || [];
+            if (removed.length) {
+              // 撤回「新增」是把它删掉，不是还原文件
+              log(`✔ 已删掉 ${removed.length} 项（撤回新增）。`, "ok");
+              for (const id of removed) log(`${escapeText(id)} → 已删除`);
+              if (data.redo_supported === false) {
+                log("新增不支持「恢复」：需要时重新添加即可。");
+              }
+            } else {
+              log(`✔ 已还原 ${restored.length} 个配置文件。`, "ok");
+              for (const item of restored) log(`${item.file} → 已还原`);
+            }
             if (data.safety_backup) log(`撤回前的状态已备份到：${data.safety_backup}`);
             for (const item of data.failed || []) {
-              log(`✘ ${item.file} → ${item.error}`, "err");
+              log(`✘ ${item.file || item.id} → ${item.error}`, "err");
             }
             closeUndo();
             await load(true);
@@ -1774,6 +2088,16 @@
         balanceRefresh.addEventListener("click", () => queryBalance(null));
         balanceModal.addEventListener("click", (event) => {
           if (event.target === balanceModal) closeBalance();
+        });
+        addBtn.addEventListener("click", () => openAdd("chat_completion"));
+        el("add-cancel").addEventListener("click", closeAdd);
+        addRunBtn.addEventListener("click", runAdd);
+        addTemplateSelect.addEventListener("change", () => {
+          applyTemplateDefaults();
+          updateAddHint();
+        });
+        addModal.addEventListener("click", (event) => {
+          if (event.target === addModal) closeAdd();
         });
         // 行内「查询/重查」按钮用事件委托，列表重绘后不用重新绑定
         balanceList.addEventListener("click", (event) => {

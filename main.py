@@ -1,4 +1,4 @@
-"""供应商统一管理（provider_hub）。
+"""模型提供商统一管理（provider_hub）。
 
 问题背景
 --------
@@ -62,7 +62,7 @@ import time
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 from quart import request
@@ -71,7 +71,7 @@ from astrbot.api import logger
 from astrbot.api.star import Context, Star, register
 
 PLUGIN_NAME = "provider_hub"
-PLUGIN_VERSION = "1.8.0"
+PLUGIN_VERSION = "1.9.0"
 
 # ---------------------------------------------------------------- 目录约定
 # main.py 位于 <data>/plugins/astrbot_plugin_provider_hub/，parents[2] 即 data 目录。
@@ -367,6 +367,49 @@ class _Dashboard:
             if isinstance(item, dict) and item.get("id")
         }
 
+    async def provider_schema(self) -> dict:
+        """取本体「模型提供商」面板的模板表（新增提供商时就是照它建的）。"""
+        res = await self._call("GET", "/api/v1/providers/schema")
+        payload = res.get("data")
+        if not isinstance(payload, dict):
+            raise DashboardError("/api/v1/providers/schema 返回结构异常")
+        return payload
+
+    async def create_source(self, config: dict) -> str:
+        """新增来源；本体接口会把它写进核心配置并刷新 provider_manager。"""
+        res = await self._call(
+            "POST", "/api/v1/provider-sources", {"config": config}
+        )
+        if res.get("status") == "error":
+            raise DashboardError(str(res.get("message") or "新增来源失败")[:300])
+        return str(res.get("message") or "ok")
+
+    async def create_provider(self, config: dict) -> str:
+        """新增模型条目；本体接口会写盘并当场实例化，无需重启。"""
+        res = await self._call("POST", "/api/v1/providers", {"config": config})
+        if res.get("status") == "error":
+            raise DashboardError(str(res.get("message") or "新增提供商失败")[:300])
+        return str(res.get("message") or "ok")
+
+    async def delete_provider(self, provider_id: str) -> str:
+        res = await self._call(
+            "DELETE",
+            "/api/v1/providers/by-id?provider_id=" + quote(provider_id, safe=""),
+        )
+        if res.get("status") == "error":
+            raise DashboardError(str(res.get("message") or "删除提供商失败")[:300])
+        return str(res.get("message") or "ok")
+
+    async def delete_source(self, source_id: str) -> str:
+        res = await self._call(
+            "DELETE",
+            "/api/v1/provider-sources/by-id?source_id="
+            + quote(source_id, safe=""),
+        )
+        if res.get("status") == "error":
+            raise DashboardError(str(res.get("message") or "删除来源失败")[:300])
+        return str(res.get("message") or "ok")
+
 
 # ------------------------------------------------------------------ 供应商分类
 
@@ -574,6 +617,155 @@ def _load_sources() -> list[dict]:
             }
         )
     return sources
+
+
+# ------------------------------------------------------------------ 新增提供商
+
+# 模板里的字段名在不同能力上并不统一：对话类来源用 key/api_base，
+# 语音用 api_key/api_base，嵌入用 embedding_api_key/embedding_api_base，
+# 重排序用 rerank_*。这里列出候选名，遇到哪个改哪个，避免按名字硬编码。
+_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
+    "api_base": ("api_base", "embedding_api_base", "rerank_api_base"),
+    "key": ("key", "api_key", "embedding_api_key", "rerank_api_key"),
+    "model": ("model", "embedding_model", "rerank_model"),
+    "timeout": ("timeout",),
+    "proxy": ("proxy",),
+}
+
+# 模板表来自本体 /api/v1/providers/schema，进程内缓存，过期自动重取。
+_TEMPLATE_CACHE: dict[str, Any] = {"at": 0.0, "items": []}
+_TEMPLATE_TTL = 600
+
+
+def _clean_template(raw: dict) -> dict:
+    """模板里只留可填字段：``hint`` 是 i18n key，``id``/``enable`` 由我们决定。"""
+    return {
+        key: value
+        for key, value in raw.items()
+        if key not in ("hint", "id", "enable")
+    }
+
+
+async def _provider_templates(force: bool = False) -> list[dict]:
+    """按能力归类的提供商模板（就是本体「新增提供商」里那张表）。"""
+    now = time.time()
+    cached = _TEMPLATE_CACHE.get("items") or []
+    if not force and cached and now - float(_TEMPLATE_CACHE.get("at") or 0) < _TEMPLATE_TTL:
+        return cached
+
+    schema = await _Dashboard().provider_schema()
+    raw = (
+        ((schema.get("config_schema") or {}).get("provider") or {}).get(
+            "config_template"
+        )
+        or {}
+    )
+    items: list[dict] = []
+    for label, tmpl in raw.items():
+        if not isinstance(tmpl, dict):
+            continue
+        provider_type = str(tmpl.get("provider_type") or "").strip()
+        if provider_type not in PROVIDER_TYPE_LABELS:
+            continue
+        # agent_runner 之类的内部类型本体面板也不列，这里一并跳过
+        if provider_type == "agent_runner":
+            continue
+        items.append(
+            {
+                "label": str(label),
+                "type": str(tmpl.get("type") or ""),
+                "provider": str(tmpl.get("provider") or ""),
+                "provider_type": provider_type,
+                "defaults": _clean_template(tmpl),
+            }
+        )
+    order = {name: idx for idx, name in enumerate(PROVIDER_TYPE_ORDER)}
+    items.sort(key=lambda item: (order.get(item["provider_type"], 99), item["label"]))
+    _TEMPLATE_CACHE["at"] = now
+    _TEMPLATE_CACHE["items"] = items
+    return items
+
+
+def _template_of(items: list[dict], label: str, provider_type: str) -> dict:
+    for item in items:
+        if item["label"] == label and item["provider_type"] == provider_type:
+            return item
+    raise ValueError(f"没有这个提供商类型：{label}（{PROVIDER_TYPE_LABELS.get(provider_type, provider_type)}）")
+
+
+def _fill_alias(target: dict, kind: str, value: Any) -> bool:
+    """把 value 写进模板里对应的字段名；模板没有该字段就跳过。"""
+    for key in _FIELD_ALIASES[kind]:
+        if key in target:
+            target[key] = value
+            return True
+    return False
+
+
+def _build_source_cfg(
+    tmpl: dict, name: str, api_base: str, key: str, timeout: Any, proxy: str
+) -> dict:
+    """对话类：密钥与地址放在 ``provider_sources``，模型条目只指向它。"""
+    cfg: dict[str, Any] = {
+        "id": name,
+        "provider": tmpl["provider"],
+        "type": tmpl["type"],
+        "provider_type": tmpl["provider_type"],
+        "key": [key] if key else [],
+        "api_base": api_base,
+        "timeout": timeout,
+        "proxy": proxy,
+        "custom_headers": {},
+        "enable": True,
+    }
+    # 模板自带的其它字段（api_version、gemini 的安全设置等）照抄，保持与本体一致
+    for field, value in (tmpl.get("defaults") or {}).items():
+        if field in cfg or field in _FIELD_ALIASES["key"] + _FIELD_ALIASES["api_base"]:
+            continue
+        cfg[field] = value
+    return cfg
+
+
+def _build_entry_cfg(
+    tmpl: dict,
+    name: str,
+    api_base: str,
+    key: str,
+    model: str,
+    timeout: Any,
+    proxy: str,
+) -> dict:
+    """非对话类（语音、嵌入、重排序）：条目自包含密钥与地址，不需要来源。"""
+    cfg: dict[str, Any] = {"id": name, "enable": True}
+    cfg.update(tmpl.get("defaults") or {})
+    cfg["id"] = name
+    cfg["enable"] = True
+    if api_base:
+        _fill_alias(cfg, "api_base", api_base)
+    if key:
+        _fill_alias(cfg, "key", key)
+    if model:
+        _fill_alias(cfg, "model", model)
+    if timeout not in (None, ""):
+        _fill_alias(cfg, "timeout", timeout)
+    if proxy:
+        _fill_alias(cfg, "proxy", proxy)
+    # 模板里的空地址/空密钥会盖掉真实值，填写后统一清一遍
+    for kind in ("api_base", "key", "model"):
+        for field in _FIELD_ALIASES[kind]:
+            if cfg.get(field) == "":
+                cfg.pop(field, None)
+    return cfg
+
+
+def _known_ids() -> tuple[set[str], set[str]]:
+    """现有的来源 id 与条目 id，用来挡住重名。"""
+    source_ids = {str(item.get("id")) for item in _load_sources()}
+    try:
+        providers, _meta = _load_providers()
+    except (OSError, ValueError):
+        providers = []
+    return source_ids, {str(item["id"]) for item in providers}
 
 
 def _pick_balance_adapter(source: dict) -> str:
@@ -1444,7 +1636,7 @@ async def _check_core(providers: list[dict]) -> dict:
 # ------------------------------------------------------------------ 插件主体
 
 
-@register(PLUGIN_NAME, "xuanbaon", "供应商引用统一管理与同步", PLUGIN_VERSION)
+@register(PLUGIN_NAME, "xuanbaon", "模型提供商（供应商）引用统一管理与同步", PLUGIN_VERSION)
 class ProviderHubPlugin(Star):
     def __init__(self, context: Context, config: Any = None) -> None:
         super().__init__(context, config)
@@ -1478,6 +1670,212 @@ class ProviderHubPlugin(Star):
             ["POST"],
             "查询供应商账户余额",
         )
+        self.context.register_web_api(
+            f"/{PLUGIN_NAME}/templates",
+            self.api_templates,
+            ["GET"],
+            "列出各类别可添加的提供商类型",
+        )
+        self.context.register_web_api(
+            f"/{PLUGIN_NAME}/add",
+            self.api_add,
+            ["POST"],
+            "新增提供商（来源 / 模型条目）",
+        )
+
+    async def api_templates(self, **_kwargs):
+        """列出五类能力下可添加的提供商类型（模板表来自本体）。"""
+        try:
+            items = await _provider_templates(force=True)
+        except DashboardError as exc:
+            return {"status": "error", "message": str(exc)[:300], "data": {}}
+
+        grouped: dict[str, list[dict]] = {name: [] for name in PROVIDER_TYPE_ORDER}
+        for item in items:
+            grouped.setdefault(item["provider_type"], []).append(
+                {
+                    "label": item["label"],
+                    "type": item["type"],
+                    "provider": item["provider"],
+                    "defaults": item["defaults"],
+                }
+            )
+        return {
+            "status": "ok",
+            "data": {
+                "groups": [
+                    {
+                        "provider_type": name,
+                        "label": PROVIDER_TYPE_LABELS.get(name, name),
+                        "items": grouped.get(name, []),
+                    }
+                    for name in PROVIDER_TYPE_ORDER
+                ],
+                "total": len(items),
+            },
+        }
+
+    async def api_add(self, **_kwargs):
+        """新增一个提供商：对话类建「来源 + 模型条目」，其余类别建自包含条目。
+
+        与本体「模型提供商」面板的新增行为一致：字段取自本体的模板表，写盘走本体
+        的 provider 接口（写盘后当场实例化，不重启 core）。任何一步失败都会把已经
+        建好的部分回滚掉，避免留下半截配置。
+        """
+        payload = await request.get_json(silent=True) or {}
+        category = str(payload.get("category") or "").strip()
+        template = str(payload.get("template") or "").strip()
+        name = str(payload.get("name") or "").strip()
+        api_base = str(payload.get("api_base") or "").strip()
+        key = str(payload.get("key") or "").strip()
+        model = str(payload.get("model") or "").strip()
+        proxy = str(payload.get("proxy") or "").strip()
+        timeout: Any = payload.get("timeout")
+        if timeout in ("", None):
+            timeout = 120
+        else:
+            try:
+                timeout = float(timeout)
+                timeout = int(timeout) if timeout == int(timeout) else timeout
+            except (TypeError, ValueError):
+                return {"status": "error", "message": "超时时间必须是数字", "data": {}}
+
+        if category not in PROVIDER_TYPE_LABELS:
+            return {"status": "error", "message": "未知的类别", "data": {}}
+        if not template:
+            return {"status": "error", "message": "请选择一个提供商类型", "data": {}}
+        if not name:
+            return {"status": "error", "message": "名称不能为空", "data": {}}
+        if not api_base:
+            return {"status": "error", "message": "API Base 不能为空", "data": {}}
+        if any(char in name for char in ("/", "\n", "\r")):
+            return {
+                "status": "error",
+                "message": "名称里不能有斜杠或换行（会与模型条目 id 冲突）",
+                "data": {},
+            }
+
+        try:
+            templates = await _provider_templates()
+            tmpl = _template_of(templates, template, category)
+        except (DashboardError, ValueError) as exc:
+            return {"status": "error", "message": str(exc)[:300], "data": {}}
+
+        source_ids, provider_ids = _known_ids()
+        if name in source_ids:
+            return {
+                "status": "error",
+                "message": f"已经有一个叫「{name}」的来源了，换个名字",
+                "data": {},
+            }
+        entry_id = str(payload.get("provider_id") or "").strip()
+        if not entry_id and model:
+            entry_id = f"{name}/{model}"
+        if entry_id and entry_id in provider_ids:
+            return {
+                "status": "error",
+                "message": f"已经有一个叫「{entry_id}」的提供商条目了，换个名字",
+                "data": {},
+            }
+        if category != DEFAULT_PROVIDER_TYPE and name in provider_ids:
+            return {
+                "status": "error",
+                "message": f"已经有一个叫「{name}」的提供商条目了，换个名字",
+                "data": {},
+            }
+
+        try:
+            dashboard = _Dashboard()
+        except DashboardError as exc:
+            return {"status": "error", "message": str(exc)[:300], "data": {}}
+
+        backup_dir = _backup(["cmd_config.json"], prefix="provider_hub-add")
+        created_source = ""
+        created_providers: list[str] = []
+        notes: list[str] = []
+
+        try:
+            if category == DEFAULT_PROVIDER_TYPE:
+                source_cfg = _build_source_cfg(
+                    tmpl, name, api_base, key, timeout, proxy
+                )
+                await dashboard.create_source(source_cfg)
+                created_source = name
+                if model:
+                    entry_cfg = {
+                        "id": entry_id,
+                        "enable": True,
+                        "provider_source_id": name,
+                        "model": model,
+                    }
+                    await dashboard.create_provider(entry_cfg)
+                    created_providers.append(entry_id)
+                else:
+                    notes.append("只建了来源；填模型名才会生成模型条目")
+            else:
+                entry_cfg = _build_entry_cfg(
+                    tmpl, name, api_base, key, model, timeout, proxy
+                )
+                await dashboard.create_provider(entry_cfg)
+                created_providers.append(name)
+        except DashboardError as exc:
+            # 回滚：先删条目再删来源（本体删来源会级联删其下模型）
+            for provider_id in created_providers:
+                try:
+                    await dashboard.delete_provider(provider_id)
+                except DashboardError:
+                    pass
+            if created_source:
+                try:
+                    await dashboard.delete_source(created_source)
+                except DashboardError:
+                    pass
+            logger.error("[provider_hub] 新增提供商失败: %s", exc)
+            return {
+                "status": "error",
+                "message": f"新增失败：{exc}"[:300],
+                "data": {"rolled_back": True},
+            }
+
+        summary = (
+            f"新增「{name}」（{PROVIDER_TYPE_LABELS.get(category, category)}"
+            + (f"，模型 {model}" if model and category == DEFAULT_PROVIDER_TYPE else "")
+            + "）"
+        )
+        _push_undo(
+            {
+                "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "kind": "add",
+                "summary": summary,
+                "backup": backup_dir,
+                "files": [],
+                "source_id": created_source,
+                "provider_ids": created_providers,
+            }
+        )
+        _clear_redo()
+        _append_history(
+            {
+                "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "kind": "add",
+                "summary": summary,
+                "source_id": created_source,
+                "providers": created_providers,
+                "backup": backup_dir,
+            }
+        )
+        _TEMPLATE_CACHE["at"] = 0.0  # 下次进页面重取模板，避免用到旧表
+
+        return {
+            "status": "ok",
+            "message": summary,
+            "data": {
+                "source_id": created_source,
+                "provider_ids": created_providers,
+                "notes": notes,
+                "backup": backup_dir,
+            },
+        }
 
     async def api_balance(self, **_kwargs):
         """查询各供应商来源的账户余额（只读，不改配置、不消耗额度）。
@@ -1987,6 +2385,12 @@ class ProviderHubPlugin(Star):
             return {"status": "error", "message": "没有可撤回的操作", "data": {}}
 
         record = stack[-1]
+        # 新增提供商走的是本体自己的增删接口，不能用「整份文件还原」来撤：
+        # 保存接口会把 provider_sources / provider 强制同步成核心内存里的值，
+        # 而内存里已经有新条目了，还原等于没还原。所以改为把新建的东西删掉。
+        if record.get("kind") == "add":
+            return await self._undo_add(record, stack)
+
         backup_dir = Path(str(record.get("backup") or ""))
         files = [
             item
@@ -2053,6 +2457,74 @@ class ProviderHubPlugin(Star):
                 "safety_backup": safety,
                 "remaining": len(stack) - (0 if failed else 1),
                 "redo_remaining": len(_load_redo()),
+            },
+        }
+
+    async def _undo_add(self, record: dict, stack: list[dict]):
+        """撤回一次「新增提供商」：把当时建的条目与来源删掉。
+
+        新增是走本体接口建的，删除也走本体接口（删来源会级联删掉它下面的模型），
+        因此这一步不占用文件快照。删干净后不回填「恢复」记录——重建只需再点一次
+        添加，没必要为此把密钥另存一份副本。
+        """
+        try:
+            dashboard = _Dashboard()
+        except DashboardError as exc:
+            return {"status": "error", "message": str(exc)[:300], "data": {}}
+
+        def _gone(text: str) -> bool:
+            lowered = text.lower()
+            return "not found" in lowered or "不存在" in text or "404" in lowered
+
+        removed: list[str] = []
+        failed: list[dict] = []
+        for provider_id in record.get("provider_ids") or []:
+            try:
+                await dashboard.delete_provider(str(provider_id))
+                removed.append(str(provider_id))
+            except DashboardError as exc:
+                if _gone(str(exc)):
+                    removed.append(str(provider_id))
+                else:
+                    failed.append({"id": str(provider_id), "error": str(exc)[:200]})
+
+        source_id = str(record.get("source_id") or "")
+        if source_id:
+            try:
+                await dashboard.delete_source(source_id)
+                removed.append(source_id)
+            except DashboardError as exc:
+                if _gone(str(exc)):
+                    removed.append(source_id)
+                else:
+                    failed.append({"id": source_id, "error": str(exc)[:200]})
+
+        if not failed:
+            _save_undo(stack[:-1])
+
+        _append_history(
+            {
+                "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "kind": "undo_add",
+                "undone": record.get("summary"),
+                "removed": removed,
+                "failed": len(failed),
+            }
+        )
+
+        label = record.get("summary") or "一次新增"
+        return {
+            "status": "ok" if not failed else "partial",
+            "message": (
+                f"已撤回「{label}」：删掉 {len(removed)} 项"
+                + ("，有失败项未删净" if failed else "；新增不支持恢复，需要时重新添加即可")
+            ),
+            "data": {
+                "removed": removed,
+                "failed": failed,
+                "remaining": len(stack) - (0 if failed else 1),
+                "redo_remaining": len(_load_redo()),
+                "redo_supported": False,
             },
         }
 

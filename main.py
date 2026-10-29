@@ -1672,7 +1672,12 @@ async def _check_core(providers: list[dict]) -> dict:
 # ------------------------------------------------------------------ 插件主体
 
 
-@register(PLUGIN_NAME, "xuanbaon", "模型提供商（供应商）引用统一管理与同步", PLUGIN_VERSION)
+@register(
+    PLUGIN_NAME,
+    "xuanbaon",
+    "把主配置、各会话配置档与各插件里的模型提供商统一管理、一键写回",
+    PLUGIN_VERSION,
+)
 class ProviderHubPlugin(Star):
     def __init__(self, context: Context, config: Any = None) -> None:
         _migrate_legacy_data()

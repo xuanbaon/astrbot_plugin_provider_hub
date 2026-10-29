@@ -68,7 +68,7 @@ from astrbot.api import logger
 from astrbot.api.star import Context, Star, register
 
 PLUGIN_NAME = "provider_hub"
-PLUGIN_VERSION = "1.4.0"
+PLUGIN_VERSION = "1.5.0"
 
 # ---------------------------------------------------------------- 目录约定
 # main.py 位于 <data>/plugins/astrbot_plugin_provider_hub/，parents[2] 即 data 目录。
@@ -188,6 +188,21 @@ def _set_path(obj: Any, path: str, value: Any) -> None:
     for part in parts[:-1]:
         cursor = cursor[part]
     cursor[parts[-1]] = value
+
+
+def _get_path(obj: Any, path: str) -> Any:
+    """按路径读值，路径不存在时抛异常（复制配置时用来判断目标有没有这个位置）。"""
+    cursor = obj
+    for part in _split_path(path):
+        cursor = cursor[part]
+    return cursor
+
+
+def _conf_file(conf_id: str) -> str:
+    """配置档 id → 相对 data 目录的文件名（默认配置就是 cmd_config.json）。"""
+    if conf_id == "default":
+        return "cmd_config.json"
+    return f"config/abconf_{conf_id}.json"
 
 
 # ------------------------------------------------------------------ 鉴权与接口
@@ -764,6 +779,12 @@ class ProviderHubPlugin(Star):
         self.context.register_web_api(
             f"/{PLUGIN_NAME}/apply", self.api_apply, ["POST"], "批量写回供应商引用"
         )
+        self.context.register_web_api(
+            f"/{PLUGIN_NAME}/copy",
+            self.api_copy,
+            ["POST"],
+            "把一个配置的供应商设置复制到另一个配置",
+        )
 
     async def api_state(self, **_kwargs):
         """返回供应商池（按五类分组）、全部引用点，以及与核心内存的对账结果。"""
@@ -1008,5 +1029,151 @@ class ProviderHubPlugin(Star):
                 "failed": failed,
                 "rejected": rejected,
                 "backup": backup_dir,
+            },
+        }
+
+    async def api_copy(self, **_kwargs):
+        """把一个配置里的供应商设置整份复制到另一个配置。
+
+        只处理「供应商引用字段」——即 ``_scan_refs`` 认得出来的那些位置，其余设置
+        （平台、人格、插件开关等）一概不动。目标里没有的字段跳过而不是硬塞，
+        源里本身类型不符（例如把嵌入模型填在对话位）也跳过，避免把已有的错复制过去。
+        """
+        payload = await request.get_json(silent=True) or {}
+        src = str(payload.get("from") or "").strip()
+        dst = str(payload.get("to") or "").strip()
+        if not src or not dst:
+            return {
+                "status": "error",
+                "message": "需要同时指定源配置和目标配置",
+                "data": {},
+            }
+        if src == dst:
+            return {"status": "error", "message": "源配置和目标配置不能是同一个", "data": {}}
+
+        try:
+            providers, _meta = _load_providers()
+            refs = _scan_refs(providers)
+        except (OSError, ValueError) as exc:
+            logger.error("[provider_hub] 复制前读取配置失败: %s", exc, exc_info=True)
+            return {"status": "error", "message": f"读取配置失败: {exc}", "data": {}}
+
+        src_refs = [ref for ref in refs if ref["conf_id"] == src]
+        if not src_refs:
+            return {
+                "status": "error",
+                "message": "源配置里没有任何供应商引用，没有可复制的内容",
+                "data": {},
+            }
+
+        type_of = {item["id"]: item["provider_type"] for item in providers}
+        try:
+            dashboard = _Dashboard()
+            src_conf = await dashboard.get_conf(src)
+            dst_conf = await dashboard.get_conf(dst)
+        except (DashboardError, KeyError, IndexError, TypeError) as exc:
+            return {"status": "error", "message": str(exc)[:300], "data": {}}
+
+        copied: list[dict] = []
+        unchanged: list[str] = []
+        skipped: list[dict] = []
+
+        for ref in src_refs:
+            path = ref["path"]
+            try:
+                value = _get_path(src_conf, path)
+            except (KeyError, IndexError, TypeError):
+                skipped.append({"path": path, "reason": "源配置里读不到该字段"})
+                continue
+
+            ids = (
+                [value]
+                if isinstance(value, str)
+                else [item for item in value if isinstance(item, str)]
+                if isinstance(value, list)
+                else []
+            )
+            unknown = [item for item in ids if item not in type_of]
+            if unknown:
+                skipped.append(
+                    {"path": path, "reason": "含未知供应商: " + "、".join(unknown)}
+                )
+                continue
+            wrong = [item for item in ids if type_of[item] != ref["provider_type"]]
+            if wrong:
+                skipped.append(
+                    {
+                        "path": path,
+                        "reason": "源配置该位置本身类型不符（"
+                        + "、".join(wrong)
+                        + "），未复制",
+                    }
+                )
+                continue
+
+            try:
+                if _get_path(dst_conf, path) == value:
+                    unchanged.append(path)
+                    continue
+            except (KeyError, IndexError, TypeError):
+                pass
+
+            try:
+                _set_path(
+                    dst_conf, path, value if isinstance(value, str) else list(value)
+                )
+            except (KeyError, IndexError, TypeError):
+                skipped.append({"path": path, "reason": "目标配置里没有这个字段"})
+                continue
+            copied.append({"path": path, "value": value})
+
+        if not copied:
+            return {
+                "status": "error",
+                "message": "没有可写入的差异：两边在这些位置上已经一致，或全部被跳过",
+                "data": {"skipped": skipped, "unchanged": len(unchanged)},
+            }
+
+        target_file = _conf_file(dst)
+        if not (DATA_DIR / target_file).exists():
+            return {
+                "status": "error",
+                "message": f"目标配置文件不存在: {target_file}",
+                "data": {"skipped": skipped},
+            }
+
+        backup_dir = _backup([target_file])
+        try:
+            message = await dashboard.save_conf(dst, dst_conf)
+        except (DashboardError, KeyError, IndexError, TypeError) as exc:
+            logger.error("[provider_hub] 复制到 %s 失败: %s", dst, exc, exc_info=True)
+            return {
+                "status": "error",
+                "message": f"保存失败: {exc}"[:300],
+                "data": {"skipped": skipped, "backup": backup_dir},
+            }
+
+        _append_history(
+            {
+                "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "kind": "copy",
+                "from": src,
+                "to": dst,
+                "copied": len(copied),
+                "skipped": len(skipped),
+                "backup": backup_dir,
+                "changes": copied,
+            }
+        )
+
+        return {
+            "status": "ok",
+            "message": f"已复制 {len(copied)} 处，目标配置已保存",
+            "data": {
+                "copied": copied,
+                "skipped": skipped,
+                "unchanged": len(unchanged),
+                "backup": backup_dir,
+                "result": message,
             },
         }

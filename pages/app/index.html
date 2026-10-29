@@ -76,7 +76,6 @@
       .pool .card .t { font-size: 12px; color: var(--muted); }
       .pool .card .n { font-size: 20px; font-weight: 600; }
       .pool .card.zero .n { color: var(--muted); }
-
       .toolbar {
         display: flex;
         flex-wrap: wrap;
@@ -127,6 +126,21 @@
         gap: 8px;
       }
       .group > h2 .count { color: var(--muted); font-weight: 400; font-size: 12px; }
+
+      /* 分组可收起：点标题折叠，状态记在本机，重新扫描后仍保留 */
+      .group > h2.group-title { cursor: pointer; user-select: none; }
+      .group > h2.group-title:hover { color: var(--accent); }
+      .group > h2 .caret {
+        display: inline-block;
+        width: 12px;
+        color: var(--muted);
+        transition: transform 0.15s;
+      }
+      .group.collapsed > h2 .caret { transform: rotate(-90deg); }
+      .group.collapsed > table { display: none; }
+      .group.collapsed > h2 { margin-bottom: 0; }
+      .group > h2 .dirty-badge { font-size: 11px; font-weight: 400; }
+
       table {
         width: 100%;
         border-collapse: collapse;
@@ -207,6 +221,35 @@
         display: none;
       }
       .log.show { display: block; }
+
+      /* 复制配置弹层 */
+      .modal {
+        position: fixed;
+        inset: 0;
+        z-index: 50;
+        background: rgba(0, 0, 0, 0.45);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 20px;
+      }
+      .modal[hidden] { display: none; }
+      .modal-box {
+        width: min(520px, 100%);
+        background: var(--panel);
+        border: 1px solid var(--border-strong);
+        border-radius: 12px;
+        padding: 18px 20px;
+        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.28);
+      }
+      .modal-box h3 { margin: 0 0 8px; font-size: 15px; }
+      .modal-box p { margin: 0 0 12px; font-size: 13px; color: var(--muted); line-height: 1.6; }
+      .modal-box label { display: flex; align-items: center; gap: 8px; font-size: 13px; margin-bottom: 10px; }
+      .modal-box label select { flex: 1; min-width: 0; }
+      .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+      .modal-hint { font-size: 12px; color: var(--muted); margin-top: 10px; line-height: 1.6; }
+      .modal-hint.warn { color: var(--err); }
+
       .log .ok { color: var(--ok); }
       .log .err { color: var(--err); }
       .empty { padding: 40px; text-align: center; color: var(--muted); }
@@ -229,18 +272,23 @@
       编辑，点 × 删单项、下拉加项、可一键清空，顺序即回退优先级。
       改动会记在它所属的配置文件上——切换配置文件后仍会一并同步，不必回头重改。
       供应商有增删改时，点「重新扫描」刷新即可。
+      「复制配置…」把某个配置里的供应商设置整份搬到另一个配置（只动供应商字段，
+      复制前自动备份目标）；分组标题点一下就能收起/展开，配置多时不必反复滚动。
     </div>
 
     <div class="pool" id="pool"></div>
 
     <div class="toolbar">
       <button id="rescan" type="button" title="重新读取配置并分类（只读，不写盘）">重新扫描</button>
+      <button id="copy-btn" type="button" title="把一个配置里的供应商设置整体复制到另一个配置">复制配置…</button>
       <label>配置文件 <select id="profile-filter"><option value="all">全部配置文件</option></select></label>
       <label>能力筛 <select id="type-filter"><option value="">全部类型</option></select></label>
       <label>批量设为 <select id="bulk-target"><option value="">选择供应商…</option></select></label>
       <button id="bulk-apply" type="button">应用到勾选行</button>
       <button id="select-all" type="button">全选</button>
       <button id="select-none" type="button">取消全选</button>
+      <button id="collapse-all" type="button" title="收起当前列出的所有分组">全部收起</button>
+      <button id="expand-all" type="button" title="展开所有分组">全部展开</button>
       <label><input type="checkbox" id="show-voice" /> 显示音色表（每个角色本就不同）</label>
       <span class="spacer"></span>
       <span id="scanned"></span>
@@ -250,6 +298,23 @@
 
     <main id="content"><div class="empty">正在扫描配置…</div></main>
     <div class="log" id="log"></div>
+
+    <div class="modal" id="copy-modal" hidden>
+      <div class="modal-box">
+        <h3>复制供应商设置</h3>
+        <p>
+          把<b>源配置</b>里的供应商引用（主对话、回退对话模型、上下文压缩、图像理解、语音、嵌入、重排序等）
+          整体写到<b>目标配置</b>，同名位置会被覆盖；其余设置（平台、人格、插件开关等）不动。
+        </p>
+        <label>源配置 <select id="copy-from"></select></label>
+        <label>目标配置 <select id="copy-to"></select></label>
+        <div class="modal-hint" id="copy-hint"></div>
+        <div class="modal-actions">
+          <button id="copy-cancel" type="button">取消</button>
+          <button id="copy-run" class="primary" type="button">开始复制</button>
+        </div>
+      </div>
+    </div>
 
     <script>
       (function () {
@@ -275,6 +340,11 @@
         const profileFilterSelect = el("profile-filter");
         const poolBox = el("pool");
         const rescanBtn = el("rescan");
+        const copyModal = el("copy-modal");
+        const copyFromSelect = el("copy-from");
+        const copyToSelect = el("copy-to");
+        const copyHint = el("copy-hint");
+        const copyRunBtn = el("copy-run");
 
         /* ---------------- 后端调用 ----------------
          * 本页跑在 WebUI 的沙箱 iframe 里（sandbox 未给 allow-same-origin，
@@ -403,6 +473,7 @@
             ? `待同步 ${dirty} 处` + (hidden ? `（${hidden} 处不在当前视图）` : "")
             : "无待同步改动";
           pendingBox.className = dirty ? "dirty" : "";
+          refreshDirtyBadges();
         }
 
         /* ---------------- 供应商池（五类概览，可点击筛选） ---------------- */
@@ -441,6 +512,82 @@
           return current === next ? "" : next;
         }
 
+        /* ---------------- 分组收起/展开 ----------------
+           分组标题可点，收起状态记在本机；沙箱里 localStorage 可能被禁用，
+           失败就退回内存，本次会话内仍然可用。 */
+
+        const COLLAPSE_KEY = "provider_hub.collapsed";
+        let collapsedCache = null;
+
+        function loadCollapsed() {
+          if (collapsedCache) return collapsedCache;
+          try {
+            const raw = window.localStorage.getItem(COLLAPSE_KEY);
+            collapsedCache = new Set(raw ? JSON.parse(raw) : []);
+          } catch (err) {
+            collapsedCache = new Set();
+          }
+          return collapsedCache;
+        }
+
+        function saveCollapsed(set) {
+          collapsedCache = set;
+          try {
+            window.localStorage.setItem(COLLAPSE_KEY, JSON.stringify(Array.from(set)));
+          } catch (err) {
+            /* 无痕或沙箱环境：只在本次会话内有效 */
+          }
+        }
+
+        function applyCollapse() {
+          const set = loadCollapsed();
+          content.querySelectorAll("section.group").forEach((section) => {
+            const collapsed = set.has(section.dataset.file);
+            section.classList.toggle("collapsed", collapsed);
+            const title = section.querySelector(".group-title");
+            if (title) title.title = collapsed ? "点击展开" : "点击收起";
+          });
+        }
+
+        function toggleGroup(file) {
+          const set = loadCollapsed();
+          if (set.has(file)) set.delete(file);
+          else set.add(file);
+          saveCollapsed(set);
+          applyCollapse();
+        }
+
+        function setAllCollapsed(collapsed) {
+          const set = loadCollapsed();
+          for (const ref of refs) {
+            if (!isVisible(ref)) continue;
+            if (collapsed) set.add(ref.file);
+            else set.delete(ref.file);
+          }
+          saveCollapsed(set);
+          applyCollapse();
+        }
+
+        /** 收起时看不到行，用标题上的小标提示这组里还有多少未同步改动。 */
+        function refreshDirtyBadges() {
+          content.querySelectorAll("section.group").forEach((section) => {
+            const title = section.querySelector(".group-title");
+            if (!title) return;
+            const count = section.querySelectorAll("tbody tr.changed").length;
+            let badge = title.querySelector(".dirty-badge");
+            if (!count) {
+              if (badge) badge.remove();
+              return;
+            }
+            if (!badge) {
+              badge = document.createElement("span");
+              badge.className = "chip warn dirty-badge";
+              title.appendChild(badge);
+            }
+            badge.textContent = `有 ${count} 处未同步`;
+          });
+        }
+
         /* ---------------- 引用表格 ---------------- */
 
         function render() {
@@ -454,16 +601,42 @@
 
           const grouped = new Map();
           for (const ref of visible) {
-            if (!grouped.has(ref.file)) grouped.set(ref.file, { label: ref.file_label, items: [] });
+            if (!grouped.has(ref.file)) {
+              grouped.set(ref.file, { file: ref.file, label: ref.file_label, items: [] });
+            }
             grouped.get(ref.file).items.push(ref);
           }
 
+          const collapsedSet = loadCollapsed();
           for (const [, group] of grouped) {
             const section = document.createElement("section");
-            section.className = "group";
+            const isCollapsed = collapsedSet.has(group.file);
+            section.className = "group" + (isCollapsed ? " collapsed" : "");
+            section.dataset.file = group.file;
 
+            // 标题即折叠开关：caret 旋转 + 只留一行标题，省去长表格的滚动
             const title = document.createElement("h2");
-            title.innerHTML = `${group.label} <span class="count">${group.items.length} 处</span>`;
+            title.className = "group-title";
+            title.title = isCollapsed ? "点击展开" : "点击收起";
+            const caret = document.createElement("span");
+            caret.className = "caret";
+            caret.textContent = "▾";
+            const nameBox = document.createElement("span");
+            nameBox.textContent = group.label;
+            const countBox = document.createElement("span");
+            countBox.className = "count";
+            countBox.textContent = `${group.items.length} 处`;
+            title.appendChild(caret);
+            title.appendChild(nameBox);
+            title.appendChild(countBox);
+            const dirtyCount = group.items.filter(isDirty).length;
+            if (dirtyCount) {
+              const badge = document.createElement("span");
+              badge.className = "chip warn dirty-badge";
+              badge.textContent = `有 ${dirtyCount} 处未同步`;
+              title.appendChild(badge);
+            }
+            title.addEventListener("click", () => toggleGroup(group.file));
             section.appendChild(title);
 
             const table = document.createElement("table");
@@ -750,6 +923,104 @@
           return refs.find((ref) => ref.key === key) || { value: "", values: [] };
         }
 
+        /* ---------------- 复制配置：源配置的供应商设置整份写到目标配置 ---------------- */
+
+        let copyArmed = false;
+
+        function profileLabel(id) {
+          const found = profiles.find((item) => item.id === id);
+          return found ? found.label : id;
+        }
+
+        function countDirty() {
+          return refs.filter(isDirty).length;
+        }
+
+        function armReset() {
+          copyArmed = false;
+          copyRunBtn.textContent = "开始复制";
+          copyRunBtn.disabled = false;
+        }
+
+        function fillCopySelects() {
+          copyFromSelect.innerHTML = "";
+          copyToSelect.innerHTML = "";
+          for (const profile of profiles) {
+            copyFromSelect.appendChild(buildOption(profile.id, profile.label, false));
+            copyToSelect.appendChild(buildOption(profile.id, profile.label, false));
+          }
+          // 默认拿「默认配置文件」当源，目标优先取当前正在看的那个配置档
+          const defaultProfile = profiles.find((item) => item.is_default) || profiles[0];
+          const other =
+            profiles.find((item) => item.id === profileFilter && !item.is_default) ||
+            profiles.find((item) => item.id !== defaultProfile.id) ||
+            profiles[0];
+          copyFromSelect.value = defaultProfile.id;
+          copyToSelect.value = other.id;
+        }
+
+        function openCopy() {
+          if (profiles.length < 2) {
+            log("只扫描到一个配置，没有可复制的目标：先在本体里新建一个配置文件，再点「重新扫描」。", "err");
+            return;
+          }
+          fillCopySelects();
+          armReset();
+          const dirty = countDirty();
+          copyHint.className = "modal-hint" + (dirty ? " warn" : "");
+          copyHint.textContent = dirty
+            ? `当前有 ${dirty} 处改动还没同步：复制按磁盘上已有的配置进行，不包含这些未保存的改动。`
+            : "复制前会自动备份目标配置文件，日志里会给出备份路径。";
+          copyModal.hidden = false;
+        }
+
+        function closeCopy() {
+          copyModal.hidden = true;
+          armReset();
+        }
+
+        async function runCopy() {
+          const from = copyFromSelect.value;
+          const to = copyToSelect.value;
+          if (!from || !to) return;
+          if (from === to) {
+            copyHint.className = "modal-hint warn";
+            copyHint.textContent = "源配置和目标配置不能是同一个，请换一个目标。";
+            return;
+          }
+          // iframe 沙箱里 window.confirm 可能被禁用，这里用「再点一次」代替确认弹窗
+          if (!copyArmed) {
+            copyArmed = true;
+            copyRunBtn.textContent = "确认复制（覆盖目标）";
+            copyHint.className = "modal-hint warn";
+            copyHint.textContent = `将把「${profileLabel(from)}」的全部供应商设置写入「${profileLabel(
+              to
+            )}」，目标里同名位置会被覆盖。`;
+            return;
+          }
+          copyRunBtn.disabled = true;
+          copyRunBtn.textContent = "复制中…";
+          clearLog();
+          try {
+            const { data } = unwrap(await apiPost("copy", { from: from, to: to }));
+            const copied = (data.copied || []).length;
+            log(
+              `✔ 已把 ${copied} 处供应商设置从「${profileLabel(from)}」复制到「${profileLabel(to)}」。`,
+              "ok"
+            );
+            if (data.unchanged) log(`另有 ${data.unchanged} 处两边本来就一致，未改动。`);
+            if (data.backup) log(`目标配置已备份到：${data.backup}`);
+            for (const item of data.skipped || []) {
+              log(`✘ ${item.path} → ${item.reason}`, "err");
+            }
+            closeCopy();
+            await load(true);
+          } catch (err) {
+            log("复制失败：" + (err && err.message ? err.message : String(err)), "err");
+            armReset();
+          }
+        }
+
         /* ---------------- 同步 ---------------- */
 
         async function sync() {
@@ -920,6 +1191,16 @@
           render();
         });
         rescanBtn.addEventListener("click", () => load(false));
+        el("copy-btn").addEventListener("click", openCopy);
+        el("copy-cancel").addEventListener("click", closeCopy);
+        copyRunBtn.addEventListener("click", runCopy);
+        copyFromSelect.addEventListener("change", armReset);
+        copyToSelect.addEventListener("change", armReset);
+        copyModal.addEventListener("click", (event) => {
+          if (event.target === copyModal) closeCopy();
+        });
+        el("collapse-all").addEventListener("click", () => setAllCollapsed(true));
+        el("expand-all").addEventListener("click", () => setAllCollapsed(false));
         el("bulk-apply").addEventListener("click", applyBulk);
         el("select-all").addEventListener("click", () => {
           content.querySelectorAll(".row-check").forEach((cb) => (cb.checked = true));

@@ -68,7 +68,7 @@ from astrbot.api import logger
 from astrbot.api.star import Context, Star, register
 
 PLUGIN_NAME = "provider_hub"
-PLUGIN_VERSION = "1.5.0"
+PLUGIN_VERSION = "1.5.1"
 
 # ---------------------------------------------------------------- 目录约定
 # main.py 位于 <data>/plugins/astrbot_plugin_provider_hub/，parents[2] 即 data 目录。
@@ -80,6 +80,9 @@ BACKUP_DIR = DATA_DIR / "config_backups"
 PLUGIN_DATA_DIR = DATA_DIR / "plugin_data" / PLUGIN_NAME
 HISTORY_FILE = PLUGIN_DATA_DIR / "history.jsonl"
 HISTORY_LIMIT = 50
+# 撤回栈：记录每次写盘的「写前快照」，可逐步撤回最近若干次操作。
+UNDO_FILE = PLUGIN_DATA_DIR / "undo_stack.json"
+UNDO_LIMIT = 10
 # 记住上次连通的管理端口（桌面端会随机化端口，环境变量缺失时靠它兜底）。
 PORT_HINT_FILE = PLUGIN_DATA_DIR / "dashboard_port.txt"
 
@@ -704,10 +707,18 @@ def _scan_refs(providers: list[dict]) -> list[dict]:
 # ------------------------------------------------------------------ 备份与历史
 
 
-def _backup(files: list[str]) -> str:
-    """把待改文件整份复制到 data/config_backups/provider_hub-<时间>/。"""
+def _backup(files: list[str], prefix: str = "provider_hub") -> str:
+    """把待改文件整份复制到 data/config_backups/<prefix>-<时间>/。
+
+    目录名精确到秒；同一秒内连续两次操作（例如撤回时先备份当前状态）会撞名，
+    撞名时旧快照会被覆盖、撤回就还原成了"改之后"的状态，所以这里加序号避让。
+    """
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    target = BACKUP_DIR / f"provider_hub-{stamp}"
+    target = BACKUP_DIR / f"{prefix}-{stamp}"
+    seq = 2
+    while target.exists():
+        target = BACKUP_DIR / f"{prefix}-{stamp}-{seq}"
+        seq += 1
     target.mkdir(parents=True, exist_ok=True)
     for rel in files:
         src = DATA_DIR / rel
@@ -736,6 +747,39 @@ def _append_history(record: dict) -> None:
         )
     except OSError as exc:
         logger.warning("[provider_hub] 写入同步历史失败: %s", exc)
+
+
+# ------------------------------------------------------------------ 撤回栈
+
+
+def _load_undo() -> list[dict]:
+    """读取撤回栈（最近的在末尾）；文件坏了就当作空栈，不影响主流程。"""
+    try:
+        if UNDO_FILE.exists():
+            data = json.loads(UNDO_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return [item for item in data if isinstance(item, dict)]
+    except (OSError, ValueError) as exc:
+        logger.warning("[provider_hub] 读取撤回栈失败: %s", exc)
+    return []
+
+
+def _save_undo(stack: list[dict]) -> None:
+    try:
+        PLUGIN_DATA_DIR.mkdir(parents=True, exist_ok=True)
+        UNDO_FILE.write_text(
+            json.dumps(stack[-UNDO_LIMIT:], ensure_ascii=False, indent=1) + "\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        logger.warning("[provider_hub] 写入撤回栈失败: %s", exc)
+
+
+def _push_undo(record: dict) -> None:
+    """登记一次写盘：备份目录 + 涉及的文件及其归属（配置档 / 插件）。"""
+    stack = _load_undo()
+    stack.append(record)
+    _save_undo(stack)
 
 
 # ------------------------------------------------------------------ 与本体对账
@@ -785,6 +829,12 @@ class ProviderHubPlugin(Star):
             ["POST"],
             "把一个配置的供应商设置复制到另一个配置",
         )
+        self.context.register_web_api(
+            f"/{PLUGIN_NAME}/undo",
+            self.api_undo,
+            ["POST"],
+            "撤回最近一次同步或复制",
+        )
 
     async def api_state(self, **_kwargs):
         """返回供应商池（按五类分组）、全部引用点，以及与核心内存的对账结果。"""
@@ -817,6 +867,10 @@ class ProviderHubPlugin(Star):
                 ref["file_label"] = label
         plugin_refs = sum(1 for ref in refs if not ref["conf_id"])
 
+        # 撤回信息：告诉前端上一次动了哪个配置，以及还能往回退几步
+        undo_stack = _load_undo()
+        last_op = undo_stack[-1] if undo_stack else None
+
         return {
             "status": "ok",
             "data": {
@@ -827,6 +881,19 @@ class ProviderHubPlugin(Star):
                 "profiles": profiles,
                 "refs": refs,
                 "scanned_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "last_op": (
+                    {
+                        "time": last_op.get("time"),
+                        "kind": last_op.get("kind"),
+                        "summary": last_op.get("summary"),
+                        "from": last_op.get("from"),
+                        "to": last_op.get("to"),
+                    }
+                    if last_op
+                    else None
+                ),
+                "undo_remaining": len(undo_stack),
+
                 "core_check": await _check_core(providers),
                 "summary": {
                     "total": len(refs),
@@ -1021,6 +1088,29 @@ class ProviderHubPlugin(Star):
             }
         )
 
+        # 登记到撤回栈：备份目录里就是这次写盘前的原文件
+        if applied:
+            scopes: dict[str, dict] = {}
+            for (conf_id, plugin_id), items in grouped.items():
+                for entry in items:
+                    scopes.setdefault(
+                        entry["file"],
+                        {
+                            "file": entry["file"],
+                            "conf_id": conf_id,
+                            "plugin_id": plugin_id,
+                        },
+                    )
+            _push_undo(
+                {
+                    "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "kind": "sync",
+                    "summary": f"同步 {len(applied)} 处供应商引用",
+                    "backup": backup_dir,
+                    "files": list(scopes.values()),
+                }
+            )
+
         return {
             "status": "ok" if not failed else "partial",
             "message": f"已同步 {len(applied)} 处，失败 {len(failed)} 处，拒绝 {len(rejected)} 处",
@@ -1166,6 +1256,18 @@ class ProviderHubPlugin(Star):
             }
         )
 
+        _push_undo(
+            {
+                "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "kind": "copy",
+                "summary": f"复制 {len(copied)} 处到目标配置",
+                "from": src,
+                "to": dst,
+                "backup": backup_dir,
+                "files": [{"file": target_file, "conf_id": dst, "plugin_id": ""}],
+            }
+        )
+
         return {
             "status": "ok",
             "message": f"已复制 {len(copied)} 处，目标配置已保存",
@@ -1177,3 +1279,96 @@ class ProviderHubPlugin(Star):
                 "result": message,
             },
         }
+
+    async def api_undo(self, **_kwargs):
+        """撤回最近一次写盘（同步或复制）。
+
+        每次写盘前都整份备份过原文件，这里直接把备份还原回去：核心配置仍走保存
+        接口（还原后立即热重载），插件配置写回 JSON 再让插件重载。还原前会先把
+        当前状态再备份一份，所以「撤回」本身也能反悔。
+        """
+        stack = _load_undo()
+        if not stack:
+            return {"status": "error", "message": "没有可撤回的操作", "data": {}}
+
+        record = stack[-1]
+        backup_dir = Path(str(record.get("backup") or ""))
+        files = [
+            item
+            for item in record.get("files") or []
+            if isinstance(item, dict) and item.get("file")
+        ]
+        if not backup_dir.is_dir() or not files:
+            # 快照被手动删掉或记录损坏：丢掉这条，别卡住后面的
+            _save_undo(stack[:-1])
+            return {
+                "status": "error",
+                "message": "这条操作的备份快照已不存在，已从撤回列表移除；可以再点一次撤回更早的操作",
+                "data": {},
+            }
+
+        try:
+            dashboard = _Dashboard()
+        except DashboardError as exc:
+            return {"status": "error", "message": str(exc)[:300], "data": {}}
+
+        # 撤回本身也留后路：先把当前状态再备份一份（单独前缀，绝不覆盖撤回源快照）
+        safety = _backup([str(item["file"]) for item in files], prefix="provider_hub-undo")
+
+        restored: list[dict] = []
+        failed: list[dict] = []
+        for item in files:
+            rel = str(item["file"])
+            snapshot = backup_dir / Path(rel).name
+            if not snapshot.exists():
+                failed.append({"file": rel, "error": "快照文件缺失"})
+                continue
+            try:
+                data = _read_json(snapshot)
+            except (OSError, ValueError) as exc:
+                failed.append({"file": rel, "error": f"快照无法解析: {exc}"[:200]})
+                continue
+
+            conf_id = str(item.get("conf_id") or "")
+            plugin_id = str(item.get("plugin_id") or "")
+            try:
+                if conf_id:
+                    await dashboard.save_conf(conf_id, data)
+                else:
+                    _write_json(DATA_DIR / rel, data)
+                    if plugin_id:
+                        await dashboard.reload_plugin(plugin_id)
+                restored.append({"file": rel, "scope": conf_id or plugin_id})
+            except (DashboardError, OSError, ValueError) as exc:
+                logger.error("[provider_hub] 撤回 %s 失败: %s", rel, exc, exc_info=True)
+                failed.append({"file": rel, "error": str(exc)[:300]})
+
+        # 全部还原成功才出栈；有失败就留着，方便再点一次重试
+        if not failed:
+            _save_undo(stack[:-1])
+
+        _append_history(
+            {
+                "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "kind": "undo",
+                "undone": record.get("summary"),
+                "restored": len(restored),
+                "failed": len(failed),
+                "backup": safety,
+            }
+        )
+
+        return {
+            "status": "ok" if not failed else "partial",
+            "message": (
+                f"已撤回「{record.get('summary')}」：还原 {len(restored)} 个配置文件"
+                + (f"，失败 {len(failed)} 个" if failed else "")
+            ),
+            "data": {
+                "restored": restored,
+                "failed": failed,
+                "safety_backup": safety,
+                "remaining": len(stack) - (0 if failed else 1),
+            },
+        }
+

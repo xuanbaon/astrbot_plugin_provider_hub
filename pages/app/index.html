@@ -159,9 +159,44 @@
       tr.changed td { background: color-mix(in srgb, var(--accent) 10%, transparent); }
       tr.mismatch td { background: color-mix(in srgb, var(--err) 7%, transparent); }
       td select { min-width: 190px; max-width: 300px; width: 100%; }
-      td select[multiple] { padding: 2px; }
-      td select[multiple] option { padding: 2px 4px; }
-      .multi-hint { margin-top: 3px; font-size: 11px; color: var(--muted); line-height: 1.4; }
+
+      /* 多值字段（回退对话模型等）：标签 + × 移除 + 添加下拉 + 清空 */
+      .multi-edit { display: flex; flex-direction: column; gap: 5px; min-width: 210px; }
+      .multi-list { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; min-height: 22px; }
+      .multi-empty { font-size: 12px; color: var(--muted); }
+      .tag {
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+        padding: 1px 3px 1px 8px;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        background: var(--chip);
+        font-size: 12px;
+        max-width: 100%;
+      }
+      .tag > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .tag.tag-stale { border-color: color-mix(in srgb, var(--err) 45%, transparent); }
+      .tag-del {
+        border: none;
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+        font-size: 14px;
+        line-height: 1;
+        padding: 0 3px;
+        border-radius: 50%;
+      }
+      .tag-del:hover { color: var(--err); background: color-mix(in srgb, var(--err) 12%, transparent); }
+      .multi-actions { display: flex; gap: 6px; align-items: center; }
+      .multi-actions .multi-add { flex: 1 1 auto; min-width: 120px; width: auto; }
+      .multi-actions .multi-clear {
+        flex: 0 0 auto;
+        padding: 3px 8px;
+        font-size: 12px;
+        white-space: nowrap;
+      }
+      .multi-hint { margin-top: 1px; font-size: 11px; color: var(--muted); line-height: 1.4; }
       .log {
         margin-top: 18px;
         padding: 12px 14px;
@@ -492,47 +527,104 @@
               const current = currentOf(ref);
 
               if (ref.multi) {
-                // 多值字段用多选框：本体面板里这个字段也是可多选的
-                const select = document.createElement("select");
-                select.multiple = true;
-                select.size = Math.min(Math.max(pool.length, 2), 5);
-                select.dataset.providerType = ref.provider_type;
-                select.dataset.multi = "1";
-                const selectedSet = new Set(current);
-                for (const provider of pool) {
-                  const label = provider.id + (provider.enable === false ? "（已停用）" : "");
-                  const opt = buildOption(provider.id, label, selectedSet.has(provider.id));
-                  opt.title = `${provider.provider_type_label} · ${typeFromLabel(provider.type_from)}`;
-                  select.appendChild(opt);
-                }
-                // 已选但不在候选池里的（类型变了/供应商被删）单独补一条，避免"悄悄丢掉"
-                for (const value of current) {
-                  if (!pool.some((p) => p.id === value)) {
-                    select.appendChild(buildOption(value, value + "（类型或供应商不符）", true));
-                  }
-                }
-                select.addEventListener("change", () => {
-                  const picked = Array.from(select.selectedOptions).map((opt) => opt.value);
-                  // 保持原有顺序，新选的追加在后面：回退顺序不会被莫名打乱
-                  const ordered = current.filter((value) => picked.includes(value));
-                  for (const value of picked) {
-                    if (!ordered.includes(value)) ordered.push(value);
-                  }
-                  choices.set(ref.key, ordered);
+                // 多值字段：标签式编辑器。每一项都能单独 ×，另有「清空」，
+                // 不依赖 Ctrl 点选（原生多选框在部分浏览器/触控板上很难取消选中）。
+                const box = document.createElement("div");
+                box.className = "multi-edit";
+                box.dataset.providerType = ref.provider_type;
+                box.dataset.multi = "1";
+
+                const list = document.createElement("div");
+                list.className = "multi-list";
+
+                const actions = document.createElement("div");
+                actions.className = "multi-actions";
+                const addSelect = document.createElement("select");
+                addSelect.className = "multi-add";
+                const clearBtn = document.createElement("button");
+                clearBtn.type = "button";
+                clearBtn.className = "multi-clear";
+                clearBtn.textContent = "清空";
+                clearBtn.title = "把这个字段整个清空（等于不使用回退对话模型）";
+
+                /** 提交新的数组并重绘。顺序 = 回退优先级。 */
+                function commit(next) {
+                  choices.set(ref.key, next);
                   tr.classList.toggle("changed", isDirty(ref));
-                  countHint.textContent = `已选 ${ordered.length} 个`;
+                  paint();
                   updatePending();
+                }
+
+                /** 按当前值重绘标签与「添加」下拉。 */
+                function paint() {
+                  const now = currentOf(ref);
+                  list.innerHTML = "";
+                  if (!now.length) {
+                    const empty = document.createElement("span");
+                    empty.className = "multi-empty";
+                    empty.textContent = "（空）不使用回退对话模型";
+                    list.appendChild(empty);
+                  }
+                  now.forEach((value, index) => {
+                    const tag = document.createElement("span");
+                    tag.className = "tag";
+                    if (!pool.some((p) => p.id === value)) tag.classList.add("tag-stale");
+                    const text = document.createElement("span");
+                    text.textContent = `${index + 1}. ${value}`;
+                    tag.appendChild(text);
+                    const del = document.createElement("button");
+                    del.type = "button";
+                    del.className = "tag-del";
+                    del.title = "移除这一项";
+                    del.textContent = "×";
+                    del.addEventListener("click", () => {
+                      commit(
+                        currentOf(ref).filter((item) => item !== value)
+                      );
+                    });
+                    tag.appendChild(del);
+                    list.appendChild(tag);
+                  });
+
+                  // 「添加」下拉只列还没选过的候选，选完即回到占位项
+                  addSelect.innerHTML = "";
+                  addSelect.appendChild(buildOption("", "＋ 添加…", true));
+                  const picked = new Set(now);
+                  const candidates = pool.filter((p) => !picked.has(p.id));
+                  for (const provider of candidates) {
+                    const label = provider.id + (provider.enable === false ? "（已停用）" : "");
+                    const opt = buildOption(provider.id, label, false);
+                    opt.title = `${provider.provider_type_label} · ${typeFromLabel(provider.type_from)}`;
+                    addSelect.appendChild(opt);
+                  }
+                  addSelect.disabled = !candidates.length;
+                  clearBtn.disabled = !now.length;
+                  countHint.textContent = now.length ? `已选 ${now.length} 个` : "当前为空";
+                }
+
+                addSelect.addEventListener("change", () => {
+                  const value = addSelect.value;
+                  if (!value) return;
+                  const now = currentOf(ref);
+                  if (!now.includes(value)) commit(now.concat([value]));
                 });
-                tdTarget.appendChild(select);
+                clearBtn.addEventListener("click", () => commit([]));
+
                 const hint = document.createElement("div");
                 hint.className = "multi-hint";
                 const countHint = document.createElement("span");
-                countHint.textContent = `已选 ${current.length} 个`;
                 hint.appendChild(countHint);
                 hint.appendChild(
-                  document.createTextNode(" · 按住 Ctrl 点选可多选；顺序即回退优先级，取消全部即清空")
+                  document.createTextNode(" · 点 × 移除单项，顺序即回退优先级")
                 );
-                tdTarget.appendChild(hint);
+
+                actions.appendChild(addSelect);
+                actions.appendChild(clearBtn);
+                box.appendChild(list);
+                box.appendChild(actions);
+                box.appendChild(hint);
+                tdTarget.appendChild(box);
+                paint();
               } else {
                 // 单值字段用普通下拉
                 const select = document.createElement("select");

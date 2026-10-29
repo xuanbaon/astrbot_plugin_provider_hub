@@ -68,7 +68,7 @@ from astrbot.api import logger
 from astrbot.api.star import Context, Star, register
 
 PLUGIN_NAME = "provider_hub"
-PLUGIN_VERSION = "1.3.1"
+PLUGIN_VERSION = "1.4.0"
 
 # ---------------------------------------------------------------- 目录约定
 # main.py 位于 <data>/plugins/astrbot_plugin_provider_hub/，parents[2] 即 data 目录。
@@ -309,6 +309,24 @@ class _Dashboard:
         # legacy 路由是单数 /api/plugin/reload；v1 为 /api/v1/plugins/reload。
         await self._call("POST", "/api/plugin/reload", {"name": plugin_id})
 
+    async def list_profiles(self) -> list[dict]:
+        """取配置档列表（含用户在 WebUI 里起的名字）。
+
+        只有 ``/api/v1/config-profiles`` 会带名字，legacy 的 ``/api/config/abconfs``
+        只给 id；拿不到名字时前端会回退显示 id 前缀，不影响同步。
+        """
+        res = await self._call("GET", "/api/v1/config-profiles")
+        payload = res.get("data")
+        items = payload.get("info_list") if isinstance(payload, dict) else None
+        profiles: list[dict] = []
+        for item in items or []:
+            if not isinstance(item, dict) or not item.get("id"):
+                continue
+            profiles.append(
+                {"id": str(item["id"]), "name": str(item.get("name") or "")}
+            )
+        return profiles
+
     async def provider_ids(self) -> set[str]:
         """取核心内存里的供应商 id 集合，用于核对磁盘配置是否已生效。"""
         res = await self._call("GET", "/api/v1/providers")
@@ -509,6 +527,49 @@ def _collect_config_files() -> list[dict]:
             }
         )
     return items
+
+
+def _build_profiles(refs: list[dict], live: list[dict]) -> list[dict]:
+    """按配置文件汇总：默认配置 + 每个会话配置档，附带名称与引用数。
+
+    ``live`` 来自 ``/api/v1/config-profiles``（id + 用户起的名字）。名字拿不到时
+    回退成 id 前 8 位，至少和 WebUI 的配置文件下拉能对上号。
+    """
+    names = {
+        str(item.get("id")): str(item.get("name") or "")
+        for item in live
+        if isinstance(item, dict) and item.get("id")
+    }
+    counts: dict[str, int] = {}
+    files: dict[str, str] = {}
+    for ref in refs:
+        conf_id = ref["conf_id"]
+        if not conf_id:
+            continue
+        counts[conf_id] = counts.get(conf_id, 0) + 1
+        files.setdefault(conf_id, ref["file"])
+
+    profiles: list[dict] = []
+    for conf_id, file in files.items():
+        raw_name = names.get(conf_id, "")
+        if conf_id == "default":
+            label = "默认配置文件"
+            if raw_name and raw_name != "default":
+                label = f"默认配置文件（{raw_name}）"
+        else:
+            label = raw_name or f"配置档 {conf_id[:8]}"
+        profiles.append(
+            {
+                "id": conf_id,
+                "name": raw_name,
+                "label": label,
+                "file": file,
+                "is_default": conf_id == "default",
+                "ref_count": counts[conf_id],
+            }
+        )
+    profiles.sort(key=lambda item: (not item["is_default"], item["label"]))
+    return profiles
 
 
 def _collect_id_fields(
@@ -719,6 +780,22 @@ class ProviderHubPlugin(Star):
             by_category[ref["category"]] = by_category.get(ref["category"], 0) + 1
             by_type[ref["provider_type"]] = by_type.get(ref["provider_type"], 0) + 1
 
+        # 配置档名字只有新接口带；拿不到就回退成 id 前缀，不影响其它功能。
+        live_profiles: list[dict] = []
+        try:
+            live_profiles = await _Dashboard().list_profiles()
+        except DashboardError as exc:
+            logger.warning("[provider_hub] 读取配置档列表失败: %s", exc)
+
+        profiles = _build_profiles(refs, live_profiles)
+        # 分组标题也用配置档的名字（原来的 file_label 只有 id 前缀，看不出是哪个配置）
+        label_by_conf = {item["id"]: item["label"] for item in profiles}
+        for ref in refs:
+            label = label_by_conf.get(ref["conf_id"])
+            if label:
+                ref["file_label"] = label
+        plugin_refs = sum(1 for ref in refs if not ref["conf_id"])
+
         return {
             "status": "ok",
             "data": {
@@ -726,6 +803,7 @@ class ProviderHubPlugin(Star):
                 "provider_groups": _group_providers(providers),
                 "provider_type_order": PROVIDER_TYPE_ORDER,
                 "provider_type_labels": PROVIDER_TYPE_LABELS,
+                "profiles": profiles,
                 "refs": refs,
                 "scanned_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "core_check": await _check_core(providers),
@@ -733,6 +811,8 @@ class ProviderHubPlugin(Star):
                     "total": len(refs),
                     "multi_total": sum(1 for ref in refs if ref["multi"]),
                     "provider_total": len(providers),
+                    "profile_total": len(profiles),
+                    "plugin_refs": plugin_refs,
                     "mismatch": sum(1 for ref in refs if ref["type_mismatch"]),
                     "by_category": by_category,
                     "by_provider_type": by_type,

@@ -217,21 +217,25 @@
       <h1>供应商统一管理</h1>
       <p class="sub">
         分类口径与 AstrBot 本体「模型提供商」面板一致：条目声明的类型 → 继承所属
-        provider_sources 的类型 → 兜底「对话」。下方列出全局配置、会话配置档与各插件中
-        指向模型供应商的字段，可在此统一修改后写回。
+        provider_sources 的类型 → 兜底「对话」。顶部「配置文件」下拉与本体一致——
+        默认配置、用户自建的会话配置档、插件配置分开展示，选定后只列该配置里的引用，
+        改完统一写回。选「全部配置文件」则一次查看所有范围。
       </p>
     </header>
 
     <div class="notice">
       本页仅在点击「一键同步」时写入文件，不做常驻监听，未同步的改动不会生效。
-      下拉框只列出同一类能力的供应商，跨类会被拒绝；「回退对话模型」等数组字段支持多选，
-      选择顺序即回退优先级。供应商有增删改时，点「重新扫描」刷新即可。
+      下拉框只列出同一类能力的供应商，跨类会被拒绝；「回退对话模型」等数组字段用标签
+      编辑，点 × 删单项、下拉加项、可一键清空，顺序即回退优先级。
+      改动会记在它所属的配置文件上——切换配置文件后仍会一并同步，不必回头重改。
+      供应商有增删改时，点「重新扫描」刷新即可。
     </div>
 
     <div class="pool" id="pool"></div>
 
     <div class="toolbar">
       <button id="rescan" type="button" title="重新读取配置并分类（只读，不写盘）">重新扫描</button>
+      <label>配置文件 <select id="profile-filter"><option value="all">全部配置文件</option></select></label>
       <label>能力筛 <select id="type-filter"><option value="">全部类型</option></select></label>
       <label>批量设为 <select id="bulk-target"><option value="">选择供应商…</option></select></label>
       <button id="bulk-apply" type="button">应用到勾选行</button>
@@ -257,6 +261,8 @@
         let choices = new Map();
         let showVoice = false;
         let typeFilter = "";
+        let profiles = [];
+        let profileFilter = "all";
         let loading = false;
 
         const el = (id) => document.getElementById(id);
@@ -266,6 +272,7 @@
         const scannedBox = el("scanned");
         const bulkSelect = el("bulk-target");
         const typeFilterSelect = el("type-filter");
+        const profileFilterSelect = el("profile-filter");
         const poolBox = el("pool");
         const rescanBtn = el("rescan");
 
@@ -352,10 +359,16 @@
           return "未声明类型，按对话处理";
         }
 
-        /** 某一行是否参与「待同步」统计与同步提交。 */
+        /** 某一行在当前筛选下是否显示（只影响显示，不影响提交）。 */
         function isVisible(ref) {
           if (!showVoice && ref.category === "tts_voice") return false;
           if (typeFilter && ref.provider_type !== typeFilter) return false;
+          // 配置文件筛选：plugin 代表插件配置（不属于任何配置档）
+          if (profileFilter === "plugin") {
+            if (ref.conf_id) return false;
+          } else if (profileFilter !== "all" && ref.conf_id !== profileFilter) {
+            return false;
+          }
           return true;
         }
 
@@ -379,11 +392,16 @@
 
         function updatePending() {
           let dirty = 0;
+          let hidden = 0;
           for (const ref of refs) {
-            if (!isVisible(ref)) continue;
-            if (isDirty(ref)) dirty += 1;
+            if (!isDirty(ref)) continue;
+            dirty += 1;
+            if (!isVisible(ref)) hidden += 1;
           }
-          pendingBox.textContent = dirty ? `待同步 ${dirty} 处` : "无待同步改动";
+          // 提交时会把所有改动一并写回，所以计数含不在当前视图的行
+          pendingBox.textContent = dirty
+            ? `待同步 ${dirty} 处` + (hidden ? `（${hidden} 处不在当前视图）` : "")
+            : "无待同步改动";
           pendingBox.className = dirty ? "dirty" : "";
         }
 
@@ -735,10 +753,12 @@
         /* ---------------- 同步 ---------------- */
 
         async function sync() {
+          // 提交所有已改动的行，不局限于当前筛选：切了配置文件再点同步也不会漏改
           const changes = [];
+          const offView = [];
           for (const ref of refs) {
-            if (!isVisible(ref)) continue;
             if (!isDirty(ref)) continue;
+            if (!isVisible(ref)) offView.push(ref);
             const change = {
               file: ref.file,
               path: ref.path,
@@ -767,6 +787,9 @@
               log(`✔ 已同步 ${applied} 处。`, "ok");
             } else {
               log(`⚠ 已同步 ${applied} 处，失败 ${failed.length} 处，拒绝 ${rejected.length} 处。`, "err");
+            }
+            if (offView.length) {
+              log(`另有 ${offView.length} 处改动不在当前视图里，已一并同步。`);
             }
             if (data.backup) log(`原配置已备份到：${data.backup}`);
             for (const item of failed) {
@@ -811,6 +834,30 @@
               typeFilterSelect.appendChild(buildOption(key, typeLabels[key] || key, false));
             }
             typeFilterSelect.value = typeFilter;
+
+            // 配置文件下拉：默认配置在最前，其后是各会话配置档，最后是插件配置
+            profiles = data.profiles || [];
+            profileFilterSelect.innerHTML = "";
+            profileFilterSelect.appendChild(buildOption("all", "全部配置文件", true));
+            for (const profile of profiles) {
+              profileFilterSelect.appendChild(
+                buildOption(
+                  profile.id,
+                  `${profile.label}（${profile.ref_count} 处）`,
+                  false
+                )
+              );
+            }
+            const pluginRefs = (data.summary || {}).plugin_refs || 0;
+            profileFilterSelect.appendChild(
+              buildOption("plugin", `插件配置（${pluginRefs} 处）`, false)
+            );
+            // 当前选项若已不存在（配置档被删），回到「全部」
+            const stillThere = Array.from(profileFilterSelect.children).some(
+              (opt) => opt.value === profileFilter
+            );
+            if (!stillThere) profileFilter = "all";
+            profileFilterSelect.value = profileFilter;
 
             renderPool();
             render();
@@ -863,6 +910,10 @@
 
         /* ---------------- 事件绑定 ---------------- */
 
+        profileFilterSelect.addEventListener("change", (event) => {
+          profileFilter = event.target.value;
+          render();
+        });
         typeFilterSelect.addEventListener("change", (event) => {
           typeFilter = event.target.value;
           renderPool();

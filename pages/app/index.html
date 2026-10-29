@@ -295,6 +295,81 @@
       .modal-hint { font-size: 12px; color: var(--muted); margin-top: 10px; line-height: 1.6; }
       .modal-hint.warn { color: var(--err); }
 
+      /* 余额弹层：一行一个来源，左边名字右边钱 */
+      .modal-box.wide { width: min(760px, 100%); }
+      .bal-head {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin: 0 0 10px;
+        flex-wrap: wrap;
+      }
+      .bal-head .bal-time { font-size: 12px; color: var(--muted); }
+      .bal-list {
+        max-height: min(52vh, 460px);
+        overflow: auto;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+      }
+      .bal-row {
+        display: grid;
+        grid-template-columns: 1fr auto auto;
+        align-items: center;
+        gap: 2px 12px;
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--border);
+      }
+      .bal-row:last-child { border-bottom: none; }
+      .bal-row:hover { background: var(--hover); }
+      .bal-name {
+        font-size: 13px;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+      .bal-tag {
+        font-size: 10px;
+        font-weight: 400;
+        color: var(--muted);
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 0 6px;
+      }
+      .bal-host {
+        font-size: 11px;
+        color: var(--muted);
+        margin-top: 2px;
+        word-break: break-all;
+      }
+      .bal-value {
+        font-size: 16px;
+        font-weight: 700;
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+      .bal-value.ok { color: var(--ok); }
+      .bal-value.low { color: var(--warn-fg); }
+      .bal-value.dim { color: var(--muted); font-size: 13px; font-weight: 400; }
+      .bal-value.err { color: var(--err); font-size: 12px; font-weight: 400; }
+      .bal-sub {
+        grid-column: 1 / -1;
+        font-size: 11px;
+        color: var(--muted);
+        line-height: 1.5;
+      }
+      .bal-sub.err { color: var(--err); }
+      .bal-sub .low-tip { color: var(--warn-fg); }
+      .bal-q {
+        padding: 2px 8px;
+        font-size: 12px;
+        border-radius: 6px;
+      }
+      .bal-q[disabled] { opacity: 0.55; cursor: default; }
+      .bal-empty { padding: 28px; text-align: center; color: var(--muted); font-size: 13px; }
+
       .log .ok { color: var(--ok); }
       .log .err { color: var(--err); }
       .empty { padding: 40px; text-align: center; color: var(--muted); }
@@ -320,6 +395,7 @@
       供应商有增删改时，点「重新扫描」刷新即可。
       「复制配置…」把某个配置里的供应商设置整份搬到另一个配置（只动供应商字段，
       复制前自动备份目标）；分组标题点一下就能收起/展开，配置多时不必反复滚动。
+      「查询余额」按来源查各家的账户余额，只读不写盘。
       万一手滑复制错了配置，点「撤回上一步」整份还原到操作前，可以连点多次逐步往回退；
       撤多了就点「恢复」退回来（快捷键 Ctrl+Y，撤回是 Ctrl+Z，Mac 用 ⌘）。
     </div>
@@ -331,6 +407,7 @@
       <button id="copy-btn" type="button" title="把一个配置里的供应商设置整体复制到另一个配置">复制配置…</button>
       <button id="undo-btn" type="button" title="撤回最近一次同步或复制">撤回上一步</button>
       <button id="redo-btn" type="button" title="恢复：把刚才撤回的内容放回去">恢复</button>
+      <button id="balance-btn" type="button" title="查询各供应商账户余额（只读，不改任何配置）">查询余额</button>
       <label>配置文件 <select id="profile-filter"><option value="all">全部配置文件</option></select></label>
       <label>能力筛 <select id="type-filter"><option value="">全部类型</option></select></label>
       <label>批量设为 <select id="bulk-target"><option value="">选择供应商…</option></select></label>
@@ -392,6 +469,28 @@
       </div>
     </div>
 
+    <div class="modal" id="balance-modal" hidden>
+      <div class="modal-box wide">
+        <h3>供应商余额</h3>
+        <p>
+          余额按<b>供应商来源</b>统计——一个来源就是一把 key 加一个地址，同一把 key
+          挂多个模型也只有一份余额。查询只读：不改配置、不消耗额度。
+        </p>
+        <div class="bal-head">
+          <button id="balance-refresh" class="primary" type="button">全部查询</button>
+          <span class="bal-time" id="balance-time"></span>
+        </div>
+        <div class="bal-list" id="balance-list"></div>
+        <div class="modal-hint" id="balance-hint">
+          各家接口口径不同：有的给余额，有的只给累计已用，还有的（智谱、书生等）不开放查询。
+          查不到时会写明原因，不代表配置有问题。
+        </div>
+        <div class="modal-actions">
+          <button id="balance-close" type="button">关闭</button>
+        </div>
+      </div>
+    </div>
+
     <script>
       (function () {
         let refs = [];
@@ -406,6 +505,9 @@
         let profileFilter = "all";
         let lastOp = null;
         let lastRedo = null;
+        let sources = [];
+        let balances = {};
+        let balancing = false;
         let loading = false;
 
         const el = (id) => document.getElementById(id);
@@ -434,6 +536,11 @@
         const redoDesc = el("redo-desc");
         const redoHint = el("redo-hint");
         const redoRunBtn = el("redo-run");
+        const balanceBtn = el("balance-btn");
+        const balanceModal = el("balance-modal");
+        const balanceList = el("balance-list");
+        const balanceTime = el("balance-time");
+        const balanceRefresh = el("balance-refresh");
 
         /* ---------------- 后端调用 ----------------
          * 本页跑在 WebUI 的沙箱 iframe 里（sandbox 未给 allow-same-origin，
@@ -1301,6 +1408,161 @@
           }
         }
 
+        /* ---------------- 余额查询 ----------------
+           余额跟 key 走，所以按「供应商来源」列，一个来源一行。
+           查询是只读的：后端只发 GET，不改配置、不消耗额度。 */
+
+        /** 把一条结果翻译成「金额 + 颜色 + 说明」；没查过的返回占位。 */
+        function describeBalance(item) {
+          if (!item) {
+            return { value: "未查询", cls: "dim", sub: "", subCls: "" };
+          }
+          const status = item.status;
+          if (status === "ok") {
+            return {
+              value: item.balance || "—",
+              cls: item.low ? "low" : "ok",
+              sub: [item.detail, item.message].filter(Boolean).join(" · "),
+              subCls: item.low ? "warn" : "",
+            };
+          }
+          if (status === "used_only") {
+            return {
+              value: item.used || "—",
+              cls: "dim",
+              sub: item.message || "只能查到累计已用",
+              subCls: "",
+            };
+          }
+          if (status === "unsupported") {
+            return {
+              value: "无接口",
+              cls: "dim",
+              sub: item.message || "该供应商没有开放的余额接口",
+              subCls: "",
+            };
+          }
+          return {
+            value: "查询失败",
+            cls: "err",
+            sub: item.message || "原因未知",
+            subCls: "err",
+          };
+        }
+
+        function renderBalance() {
+          balanceList.innerHTML = "";
+          if (!sources.length) {
+            balanceList.innerHTML =
+              '<div class="bal-empty">没有找到供应商来源：本体配置里 provider_sources 是空的。</div>';
+            balanceTime.textContent = "";
+            return;
+          }
+
+          let newest = "";
+          for (const source of sources) {
+            const cached = balances[source.id] || null;
+            if (cached && cached.checked_at && cached.checked_at > newest) {
+              newest = cached.checked_at;
+            }
+            const info = describeBalance(cached);
+
+            const row = document.createElement("div");
+            row.className = "bal-row";
+
+            const main = document.createElement("div");
+            const name = document.createElement("div");
+            name.className = "bal-name";
+            name.textContent = source.id;
+            const tag = document.createElement("span");
+            tag.className = "bal-tag";
+            tag.textContent = source.adapter_label || source.adapter || "";
+            name.appendChild(tag);
+            if (source.has_key === false) {
+              const noKey = document.createElement("span");
+              noKey.className = "bal-tag";
+              noKey.textContent = "没填 key";
+              name.appendChild(noKey);
+            }
+            main.appendChild(name);
+
+            const host = document.createElement("div");
+            host.className = "bal-host";
+            host.textContent = source.host || "（没有 API 地址）";
+            main.appendChild(host);
+            row.appendChild(main);
+
+            const value = document.createElement("div");
+            value.className = "bal-value " + info.cls;
+            value.textContent = info.value;
+            row.appendChild(value);
+
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "bal-q";
+            btn.dataset.sid = source.id;
+            btn.textContent = cached ? "重查" : "查询";
+            btn.disabled = balancing;
+            row.appendChild(btn);
+
+            if (info.sub) {
+              const sub = document.createElement("div");
+              sub.className = "bal-sub" + (info.subCls === "err" ? " err" : "");
+              if (info.subCls === "warn") {
+                const tip = document.createElement("span");
+                tip.className = "low-tip";
+                tip.textContent = "余额偏低 · ";
+                sub.appendChild(tip);
+              }
+              sub.appendChild(document.createTextNode(info.sub));
+              row.appendChild(sub);
+            }
+            balanceList.appendChild(row);
+          }
+          balanceTime.textContent = newest ? `上次查询 ${newest}` : "还没查过";
+        }
+
+        /** ids 为空表示全部；查完合并进缓存再重绘。 */
+        async function queryBalance(ids) {
+          if (balancing) return;
+          balancing = true;
+          balanceRefresh.disabled = true;
+          balanceRefresh.textContent = "查询中…";
+          for (const btn of balanceList.querySelectorAll(".bal-q")) btn.disabled = true;
+          try {
+            const body = ids && ids.length ? { source_ids: ids } : {};
+            const { data } = unwrap(await apiPost("balance", body));
+            for (const item of data.results || []) {
+              if (item && item.source_id) balances[item.source_id] = item;
+            }
+            renderBalance();
+            const results = data.results || [];
+            const okCount = results.filter((r) => r.status === "ok").length;
+            log(
+              `余额查询完成：${results.length} 个来源，${okCount} 个拿到余额（${data.elapsed_ms || 0} ms）。`,
+              "ok"
+            );
+          } catch (err) {
+            log("余额查询失败：" + (err && err.message ? err.message : String(err)), "err");
+            renderBalance();
+          } finally {
+            balancing = false;
+            balanceRefresh.disabled = false;
+            balanceRefresh.textContent = "全部查询";
+          }
+        }
+
+        function openBalance() {
+          balanceModal.hidden = false;
+          renderBalance();
+          // 第一次打开（一条缓存都没有）自动查一遍，省得用户再点一次
+          if (!Object.keys(balances).length) queryBalance(null);
+        }
+
+        function closeBalance() {
+          balanceModal.hidden = true;
+        }
+
         /* ---------------- 同步 ---------------- */
 
         async function sync() {
@@ -1416,6 +1678,11 @@
             lastRedo = data.next_redo || null;
             updateRedoButton();
 
+            // 余额：来源清单每次扫描都更新，余额数字用上次缓存的结果
+            sources = data.sources || [];
+            balances = data.balances || {};
+            if (!balanceModal.hidden) renderBalance();
+
             renderPool();
             render();
             fillBulkSelect();
@@ -1501,6 +1768,19 @@
         redoRunBtn.addEventListener("click", runRedo);
         redoModal.addEventListener("click", (event) => {
           if (event.target === redoModal) closeRedo();
+        });
+        balanceBtn.addEventListener("click", openBalance);
+        el("balance-close").addEventListener("click", closeBalance);
+        balanceRefresh.addEventListener("click", () => queryBalance(null));
+        balanceModal.addEventListener("click", (event) => {
+          if (event.target === balanceModal) closeBalance();
+        });
+        // 行内「查询/重查」按钮用事件委托，列表重绘后不用重新绑定
+        balanceList.addEventListener("click", (event) => {
+          const btn = event.target.closest(".bal-q");
+          if (!btn || btn.disabled) return;
+          const sid = btn.dataset.sid;
+          if (sid) queryBalance([sid]);
         });
         // 键盘：Ctrl/⌘+Z 撤回，Ctrl/⌘+Y 或 Ctrl/⌘+Shift+Z 恢复；
         // 焦点在输入框/下拉里时让浏览器自己处理，别抢它们的撤销/重选。

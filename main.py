@@ -50,6 +50,7 @@ embedding 填进对话位。
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -58,8 +59,10 @@ import os
 import re
 import shutil
 import time
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from quart import request
@@ -68,7 +71,7 @@ from astrbot.api import logger
 from astrbot.api.star import Context, Star, register
 
 PLUGIN_NAME = "provider_hub"
-PLUGIN_VERSION = "1.7.0"
+PLUGIN_VERSION = "1.8.0"
 
 # ---------------------------------------------------------------- 目录约定
 # main.py 位于 <data>/plugins/astrbot_plugin_provider_hub/，parents[2] 即 data 目录。
@@ -89,6 +92,8 @@ REDO_FILE = PLUGIN_DATA_DIR / "redo_stack.json"
 REDO_LIMIT = 10
 # 记住上次连通的管理端口（桌面端会随机化端口，环境变量缺失时靠它兜底）。
 PORT_HINT_FILE = PLUGIN_DATA_DIR / "dashboard_port.txt"
+# 余额查询结果缓存：面板刷新时先显示上次结果，不用每次重查。
+BALANCE_CACHE_FILE = PLUGIN_DATA_DIR / "balance_cache.json"
 
 # ---------------------------------------------------------------- 分类口径
 # 键与 astrbot.core.provider.entities.ProviderType 的取值完全一致。
@@ -469,6 +474,534 @@ def _group_providers(providers: list[dict]) -> list[dict]:
         }
         for key in PROVIDER_TYPE_ORDER
     ]
+
+
+# ------------------------------------------------------------------ 余额查询
+#
+# 余额按「来源」算而不是按「模型条目」算：一个来源就是一把 key + 一个地址，
+# 同一把 key 挂几个模型，余额是同一份。
+#
+# 三条约束：
+#   1. 只读 —— 只往配置里的 api_base 发 GET，不改任何配置、不消耗额度；
+#   2. key 不出后端 —— 返回给页面的只有来源信息和余额数字；
+#   3. 失败要能说清原因 —— 没有公开接口的（智谱、书生、官方 Anthropic 等）
+#      直接标明「无公开接口」，不要伪装成查询失败，否则用户会一直以为是自己网络问题。
+BALANCE_TIMEOUT = 8.0
+# 低于这个数在面板上标黄。按原始数值比，不做跨币种换算（够用且不会算错）。
+LOW_BALANCE_LINE = 10.0
+CURRENCY_SIGNS = {"CNY": "¥", "RMB": "¥", "USD": "$", "EUR": "€", "JPY": "¥"}
+# 中转站（OneAPI / NewAPI）常把这个字段填成上限值表示「不限额」，
+# 此时总额度没有意义，只能给出累计已用。
+UNLIMITED_SENTINEL = 10_000_000
+
+BALANCE_ADAPTER_LABELS = {
+    "deepseek": "DeepSeek 官方",
+    "siliconflow": "硅基流动",
+    "moonshot": "Moonshot 官方",
+    "openrouter": "OpenRouter",
+    "openai_billing": "OpenAI 兼容账单",
+    "unsupported": "无公开接口",
+}
+# 来源没填 api_base 时，按 provider 名兜一个官方地址（本体也允许地址留空）。
+DEFAULT_API_BASES = {
+    "deepseek": "https://api.deepseek.com",
+    "openrouter": "https://openrouter.ai/api/v1",
+    "moonshot": "https://api.moonshot.cn/v1",
+    "siliconflow": "https://api.siliconflow.cn/v1",
+}
+# 这几家的域名明确没有对外开放的余额接口，早点返回，别让用户白等超时。
+NO_BALANCE_HOSTS = (
+    "bigmodel",
+    "zhipu",
+    "volces",
+    "volcengine",
+    "aliyuncs",
+    "anthropic",
+    "generativelanguage",
+    "intern-ai",
+    "baichuan",
+    "hunyuan",
+    "tencentcloud",
+)
+
+
+def _load_sources() -> list[dict]:
+    """读出全部 provider_sources（只取查询余额需要的字段，key 留在后端）。"""
+    try:
+        cfg = _read_json(MAIN_CONFIG)
+    except (OSError, ValueError) as exc:
+        logger.warning("[provider_hub] 读取供应商来源失败: %s", exc)
+        return []
+
+    sources: list[dict] = []
+    seen: set[str] = set()
+    for raw in cfg.get("provider_sources") or []:
+        if not isinstance(raw, dict):
+            continue
+        source_id = str(raw.get("id") or "").strip()
+        if not source_id or source_id in seen:
+            continue
+        seen.add(source_id)
+
+        keys = raw.get("key")
+        if isinstance(keys, str):
+            keys = [keys]
+        key = ""
+        for item in keys or []:
+            text = str(item or "").strip()
+            if text:
+                key = text
+                break
+
+        provider = str(raw.get("provider") or "").strip()
+        api_base = str(raw.get("api_base") or "").strip()
+        if not api_base:
+            api_base = DEFAULT_API_BASES.get(provider.lower(), "")
+        provider_type = str(raw.get("provider_type") or "").strip()
+        sources.append(
+            {
+                "id": source_id,
+                "provider": provider,
+                "provider_type": (
+                    provider_type
+                    if provider_type in PROVIDER_TYPE_LABELS
+                    else DEFAULT_PROVIDER_TYPE
+                ),
+                "api_base": api_base,
+                "key": key,
+                "proxy": str(raw.get("proxy") or "").strip(),
+                "enable": bool(raw.get("enable", True)),
+            }
+        )
+    return sources
+
+
+def _pick_balance_adapter(source: dict) -> str:
+    """按域名判断该用哪套协议；认不出的退到 OpenAI 兼容账单接口。"""
+    host = urlparse(source.get("api_base") or "").netloc.lower()
+    if not host:
+        return "unsupported"
+    if "deepseek" in host:
+        return "deepseek"
+    if "siliconflow" in host:
+        return "siliconflow"
+    if "moonshot" in host:
+        return "moonshot"
+    if "openrouter" in host:
+        return "openrouter"
+    if any(word in host for word in NO_BALANCE_HOSTS):
+        return "unsupported"
+    # OneAPI / NewAPI 系的中转站都实现了这套账单接口，值得试一次。
+    return "openai_billing"
+
+
+def _api_root(base: str) -> str:
+    """补成以 /v1 结尾的根地址（多数接口都挂在 /v1 下）。"""
+    root = (base or "").rstrip("/")
+    if not root:
+        return ""
+    return root if re.search(r"/v\d+$", root) else root + "/v1"
+
+
+def _strip_version(base: str) -> str:
+    """去掉结尾的 /vN（DeepSeek 的余额接口在根路径，不在 /v1 下）。"""
+    root = (base or "").rstrip("/")
+    return root[: -len("/v1")] if root.endswith("/v1") else root
+
+
+def _to_float(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _money(amount: float, currency: str) -> str:
+    currency = (currency or "").upper()
+    sign = CURRENCY_SIGNS.get(currency)
+    if sign:
+        return f"{sign}{amount:,.2f}"
+    return f"{amount:,.2f} {currency}".strip()
+
+
+def _scrub(text: str, key: str) -> str:
+    """错误信息可能回显请求头，把 key 打掉再返回给页面。"""
+    if key and len(key) > 8 and key in text:
+        return text.replace(key, key[:4] + "***")
+    return text
+
+
+def _http_hint(status: int, text: str, key: str = "") -> str:
+    """把 HTTP 状态翻译成人能看懂的原因。"""
+    if status in (401, 403):
+        return "key 无效，或这把 key 没有查询余额的权限"
+    if status == 404:
+        return "该供应商没有余额查询端点"
+    if status == 429:
+        return "请求太频繁，稍后再试"
+    if status >= 500:
+        return f"供应商服务端出错（HTTP {status}）"
+    snippet = re.sub(r"\s+", " ", _scrub(text or "", key)).strip()[:120]
+    return f"HTTP {status}" + (f"：{snippet}" if snippet else "")
+
+
+def _balance_client(proxy: str) -> httpx.AsyncClient:
+    """带代理的客户端；旧版 httpx 用 proxies，做个兼容。"""
+    kwargs: dict[str, Any] = {"timeout": BALANCE_TIMEOUT, "follow_redirects": True}
+    if proxy:
+        try:
+            return httpx.AsyncClient(proxy=proxy, **kwargs)
+        except TypeError:
+            return httpx.AsyncClient(proxies=proxy, **kwargs)
+    return httpx.AsyncClient(**kwargs)
+
+
+async def _get_json(
+    client: httpx.AsyncClient, url: str, key: str
+) -> tuple[int, Any, str]:
+    resp = await client.get(
+        url, headers={"Authorization": f"Bearer {key}", "Accept": "application/json"}
+    )
+    text = (resp.text or "")[:2000]
+    try:
+        payload = resp.json()
+    except ValueError:
+        payload = None
+    return resp.status_code, payload, text
+
+
+async def _balance_deepseek(
+    client: httpx.AsyncClient, source: dict, key: str
+) -> dict:
+    """DeepSeek 官方：GET /user/balance，按币种给出总额。"""
+    url = _strip_version(source["api_base"]) + "/user/balance"
+    status, data, text = await _get_json(client, url, key)
+    if status != 200 or not isinstance(data, dict):
+        return {"status": "error", "message": _http_hint(status, text, key)}
+
+    infos = data.get("balance_infos") or []
+    if not infos:
+        return {"status": "error", "message": "接口没有返回余额信息"}
+
+    totals: list[str] = []
+    remarks: list[str] = []
+    first_amount: float | None = None
+    first_currency = ""
+    for info in infos:
+        if not isinstance(info, dict):
+            continue
+        amount = _to_float(info.get("total_balance"))
+        if amount is None:
+            continue
+        currency = str(info.get("currency") or "CNY")
+        if first_amount is None:
+            first_amount, first_currency = amount, currency
+            topped = _to_float(info.get("topped_up_balance"))
+            granted = _to_float(info.get("granted_balance"))
+            if topped is not None:
+                remarks.append(f"充值 {_money(topped, currency)}")
+            if granted is not None:
+                remarks.append(f"赠送 {_money(granted, currency)}")
+        else:
+            # 多币种时把其余币种的额度也列出来，避免只看到第一个币种
+            totals.append(_money(amount, currency))
+
+    if first_amount is None:
+        return {"status": "error", "message": "接口返回的余额字段无法解析"}
+
+    result = {
+        "status": "ok",
+        "amount": first_amount,
+        "currency": first_currency,
+        "balance": _money(first_amount, first_currency),
+        "detail": " · ".join(remarks),
+    }
+    if totals:
+        others = "、".join(totals)
+        result["detail"] = (result["detail"] + "；" if result["detail"] else "") + (
+            f"另有 {others}"
+        )
+    if data.get("is_available") is False:
+        result["message"] = "账户当前不可用（余额不足或被限制）"
+    return result
+
+
+async def _balance_siliconflow(
+    client: httpx.AsyncClient, source: dict, key: str
+) -> dict:
+    """硅基流动：GET /v1/user/info，取 totalBalance。"""
+    url = _api_root(source["api_base"]) + "/user/info"
+    status, data, text = await _get_json(client, url, key)
+    if status != 200 or not isinstance(data, dict):
+        return {"status": "error", "message": _http_hint(status, text, key)}
+
+    inner = data.get("data") if isinstance(data.get("data"), dict) else data
+    amount = _to_float(
+        inner.get("totalBalance") or inner.get("balance") or inner.get("chargeBalance")
+    )
+    if amount is None:
+        return {
+            "status": "error",
+            "message": f"接口没有返回余额字段（code={data.get('code')}）",
+        }
+    currency = "CNY"
+    detail_parts = []
+    charge = _to_float(inner.get("chargeBalance"))
+    if charge is not None:
+        detail_parts.append(f"充值余额 {_money(charge, currency)}")
+    return {
+        "status": "ok",
+        "amount": amount,
+        "currency": currency,
+        "balance": _money(amount, currency),
+        "detail": " · ".join(detail_parts),
+    }
+
+
+async def _balance_moonshot(
+    client: httpx.AsyncClient, source: dict, key: str
+) -> dict:
+    """Moonshot：GET /v1/users/me/balance。"""
+    url = _api_root(source["api_base"]) + "/users/me/balance"
+    status, data, text = await _get_json(client, url, key)
+    if status != 200 or not isinstance(data, dict):
+        return {"status": "error", "message": _http_hint(status, text, key)}
+
+    inner = data.get("data") if isinstance(data.get("data"), dict) else data
+    amount = _to_float(inner.get("available_balance") or inner.get("balance"))
+    if amount is None:
+        return {"status": "error", "message": "接口没有返回余额字段"}
+    currency = "CNY"
+    parts = []
+    cash = _to_float(inner.get("cash_balance"))
+    voucher = _to_float(inner.get("voucher_balance"))
+    if cash is not None:
+        parts.append(f"现金 {_money(cash, currency)}")
+    if voucher is not None:
+        parts.append(f"代金券 {_money(voucher, currency)}")
+    return {
+        "status": "ok",
+        "amount": amount,
+        "currency": currency,
+        "balance": _money(amount, currency),
+        "detail": " · ".join(parts),
+    }
+
+
+async def _balance_openrouter(
+    client: httpx.AsyncClient, source: dict, key: str
+) -> dict:
+    """OpenRouter：GET /v1/credits，余额 = 总额度 − 已用。"""
+    url = _api_root(source["api_base"]) + "/credits"
+    status, data, text = await _get_json(client, url, key)
+    if status != 200 or not isinstance(data, dict):
+        return {"status": "error", "message": _http_hint(status, text, key)}
+
+    inner = data.get("data") if isinstance(data.get("data"), dict) else data
+    total = _to_float(inner.get("total_credits"))
+    used = _to_float(inner.get("total_usage"))
+    if total is None:
+        return {"status": "error", "message": "接口没有返回额度字段"}
+    currency = "USD"
+    remaining = total - (used or 0.0)
+    return {
+        "status": "ok",
+        "amount": remaining,
+        "currency": currency,
+        "balance": _money(remaining, currency),
+        "detail": f"总额 {_money(total, currency)} · 已用 {_money(used or 0.0, currency)}",
+    }
+
+
+def _billing_window() -> tuple[str, str]:
+    """官方账单接口限制查询区间不超过 100 天，取最近 99 天；中转站一般忽略区间。"""
+    today = date.today()
+    return (today - timedelta(days=99)).isoformat(), today.isoformat()
+
+
+async def _balance_openai_billing(
+    client: httpx.AsyncClient, source: dict, key: str
+) -> dict:
+    """OpenAI 兼容账单接口，OneAPI / NewAPI 系中转站通用。
+
+    ``subscription`` 给总额度，``usage`` 给累计用量（单位是「分」）。
+    中转站把总额度填成上限值表示不限额时，只报已用，不瞎猜余额。
+    """
+    root = _api_root(source["api_base"])
+    status, sub, text = await _get_json(
+        client, root + "/dashboard/billing/subscription", key
+    )
+    if status != 200 or not isinstance(sub, dict):
+        return {"status": "error", "message": _http_hint(status, text, key)}
+
+    total = _to_float(sub.get("hard_limit_usd"))
+    if total is None:
+        total = _to_float(sub.get("system_hard_limit_usd"))
+    currency = str(sub.get("currency") or "USD").upper()
+
+    used: float | None = None
+    start, end = _billing_window()
+    u_status, usage, u_text = await _get_json(
+        client,
+        f"{root}/dashboard/billing/usage?start_date={start}&end_date={end}",
+        key,
+    )
+    if u_status == 200 and isinstance(usage, dict):
+        raw = _to_float(usage.get("total_usage"))
+        if raw is not None:
+            used = raw / 100.0  # 接口单位是分
+    elif u_status != 200:
+        logger.debug("[provider_hub] 账单用量接口返回 %s: %s", u_status, u_text[:80])
+
+    # 上限值当「不限额」处理：算出来的余额是个天文数字，没有展示意义。
+    unlimited = total is None or total >= UNLIMITED_SENTINEL or total <= 0
+    if unlimited and used is None:
+        return {"status": "error", "message": "接口没有返回可见的额度信息"}
+
+    if unlimited:
+        return {
+            "status": "used_only",
+            "used_amount": used,
+            "currency": currency,
+            "used": _money(used or 0.0, currency),
+            "message": f"该来源没有设总额上限，只能查到累计已用 {_money(used or 0.0, currency)}",
+        }
+
+    remaining = total - (used or 0.0)
+    detail = f"总额 {_money(total, currency)}"
+    if used is not None:
+        detail += f" · 已用 {_money(used, currency)}"
+    return {
+        "status": "ok",
+        "amount": remaining,
+        "currency": currency,
+        "balance": _money(remaining, currency),
+        "detail": detail,
+    }
+
+
+_BALANCE_ADAPTERS = {
+    "deepseek": _balance_deepseek,
+    "siliconflow": _balance_siliconflow,
+    "moonshot": _balance_moonshot,
+    "openrouter": _balance_openrouter,
+    "openai_billing": _balance_openai_billing,
+}
+
+
+def _source_meta() -> list[dict]:
+    """给页面看的来源清单：只有名字、地址、协议类型，**不含 key**。
+
+    余额弹层要先知道有哪些来源可查，否则没有缓存时打开就是一片空白。
+    """
+    meta: list[dict] = []
+    for source in _load_sources():
+        adapter = _pick_balance_adapter(source)
+        meta.append(
+            {
+                "id": source["id"],
+                "provider": source["provider"],
+                "provider_type": source["provider_type"],
+                "host": urlparse(source.get("api_base") or "").netloc,
+                "adapter": adapter,
+                "adapter_label": BALANCE_ADAPTER_LABELS.get(adapter, adapter),
+                "has_key": bool(source.get("key")),
+                "enable": source["enable"],
+            }
+        )
+    return meta
+
+
+async def _query_one_balance(source: dict) -> dict:
+    """查一个来源的余额；任何异常都收敛成一条结果，不拖垮整批。"""
+    meta = {
+        "source_id": source["id"],
+        "provider": source["provider"],
+        "provider_type": source["provider_type"],
+        "host": urlparse(source.get("api_base") or "").netloc,
+        "enable": source["enable"],
+    }
+    adapter = _pick_balance_adapter(source)
+    meta["adapter"] = adapter
+    meta["adapter_label"] = BALANCE_ADAPTER_LABELS.get(adapter, adapter)
+
+    started = time.time()
+    result: dict
+    if not source.get("key"):
+        result = {"status": "error", "message": "这个来源没有填 key，无法查询"}
+    elif not source.get("api_base"):
+        result = {"status": "error", "message": "这个来源没有填 API 地址，无法查询"}
+    elif adapter == "unsupported":
+        result = {
+            "status": "unsupported",
+            "message": "该供应商没有对外开放的余额接口，只能到它的控制台查看",
+        }
+    else:
+        handler = _BALANCE_ADAPTERS[adapter]
+        try:
+            async with _balance_client(source.get("proxy") or "") as client:
+                result = await asyncio.wait_for(
+                    handler(client, source, source["key"]),
+                    timeout=BALANCE_TIMEOUT + 2,
+                )
+        except asyncio.TimeoutError:
+            result = {
+                "status": "error",
+                "message": f"请求超时（{int(BALANCE_TIMEOUT)} 秒没有响应）",
+            }
+        except httpx.HTTPError as exc:
+            result = {
+                "status": "error",
+                "message": _scrub(
+                    f"网络错误：{type(exc).__name__}: {exc}", source["key"]
+                )[:200],
+            }
+        except Exception as exc:  # noqa: BLE001 - 单家失败要能继续查其它家
+            logger.warning("[provider_hub] 查询 %s 余额出错: %s", source["id"], exc)
+            result = {"status": "error", "message": f"查询出错：{exc}"[:200]}
+
+    result.setdefault("status", "ok")
+    if result["status"] == "ok":
+        amount = result.get("amount")
+        if amount is not None and amount < LOW_BALANCE_LINE:
+            result["low"] = True
+    result["elapsed_ms"] = int((time.time() - started) * 1000)
+    result["checked_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    merged = dict(meta)
+    merged.update(result)
+    return merged
+
+
+async def _query_balances(source_ids: list[str] | None) -> list[dict]:
+    """并发查询；不传 source_ids 就查全部来源。"""
+    sources = _load_sources()
+    wanted = {str(item) for item in (source_ids or []) if str(item)}
+    targets = [s for s in sources if not wanted or s["id"] in wanted]
+    if not targets:
+        return []
+    return list(await asyncio.gather(*[_query_one_balance(s) for s in targets]))
+
+
+def _load_balance_cache() -> dict:
+    try:
+        cache = _read_json(BALANCE_CACHE_FILE)
+    except (OSError, ValueError):
+        return {}
+    return cache if isinstance(cache, dict) else {}
+
+
+def _save_balance_cache(results: list[dict]) -> None:
+    cache = _load_balance_cache()
+    for item in results:
+        source_id = str(item.get("source_id") or "")
+        if source_id:
+            cache[source_id] = item
+    try:
+        _write_json(BALANCE_CACHE_FILE, cache)
+    except OSError as exc:
+        logger.warning("[provider_hub] 写入余额缓存失败: %s", exc)
 
 
 # ------------------------------------------------------------------ 引用扫描
@@ -939,6 +1472,45 @@ class ProviderHubPlugin(Star):
             ["POST"],
             "恢复最近一次撤回",
         )
+        self.context.register_web_api(
+            f"/{PLUGIN_NAME}/balance",
+            self.api_balance,
+            ["POST"],
+            "查询供应商账户余额",
+        )
+
+    async def api_balance(self, **_kwargs):
+        """查询各供应商来源的账户余额（只读，不改配置、不消耗额度）。
+
+        余额跟着 key 走，所以按 ``provider_sources`` 逐个查，一个来源一条结果；
+        可以只查指定的几个，也可以一次全查。结果写进缓存，页面刷新后仍能显示
+        上次的数字，不必重查。
+        """
+        payload = await request.get_json(silent=True) or {}
+        raw_ids = payload.get("source_ids")
+        source_ids: list[str] | None = None
+        if isinstance(raw_ids, list):
+            source_ids = [str(item) for item in raw_ids if str(item).strip()]
+
+        started = time.time()
+        try:
+            results = await _query_balances(source_ids)
+        except Exception as exc:  # noqa: BLE001 - 兜住整批失败，别让页面白等
+            logger.error("[provider_hub] 查询余额失败: %s", exc, exc_info=True)
+            return {"status": "error", "message": f"查询失败：{exc}"[:200], "data": {}}
+
+        if results:
+            _save_balance_cache(results)
+        ok_count = sum(1 for item in results if item.get("status") == "ok")
+        return {
+            "status": "ok",
+            "message": f"已查 {len(results)} 个来源，{ok_count} 个拿到余额",
+            "data": {
+                "results": results,
+                "checked_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "elapsed_ms": int((time.time() - started) * 1000),
+            },
+        }
 
     async def api_state(self, **_kwargs):
         """返回供应商池（按五类分组）、全部引用点，以及与核心内存的对账结果。"""
@@ -1012,6 +1584,10 @@ class ProviderHubPlugin(Star):
                 "redo_remaining": len(redo_stack),
 
                 "core_check": await _check_core(providers),
+                # 余额弹层要先知道有哪些来源可查（这里只给名称/地址，不含 key）
+                "sources": _source_meta(),
+                # 上次查到的余额（按来源 id 索引）；页面先显示这个，点查询才刷新
+                "balances": _load_balance_cache(),
                 "summary": {
                     "total": len(refs),
                     "multi_total": sum(1 for ref in refs if ref["multi"]),

@@ -131,6 +131,34 @@ Agent 通常只改第一层，于是：
 
 > 快捷键在输入框、下拉框里不生效——那些地方把 Ctrl+Z 留给浏览器自己的撤销。
 
+## 查询余额
+
+工具栏 **「查询余额」** 打开余额面板，一行一个**供应商来源**。
+
+余额是按来源算的，不是按模型条目算：一个来源就是一把 key 加一个地址，同一把 key 挂了几个模型，余额还是同一份。所以面板上是 4 个来源而不是 135 个模型。
+
+**只读**：只向配置里的 `api_base` 发 GET 请求，不改任何配置、不消耗额度、不产生计费。
+
+支持这些协议（按来源域名自动识别，不用手配）：
+
+| 来源 | 接口 | 给出 |
+| --- | --- | --- |
+| DeepSeek 官方 | `GET /user/balance` | 余额（含充值 / 赠送拆分，多币种一并列出） |
+| 硅基流动 | `GET /v1/user/info` | 余额 |
+| Moonshot 官方 | `GET /v1/users/me/balance` | 可用余额（含现金 / 代金券拆分） |
+| OpenRouter | `GET /v1/credits` | 余额 = 总额度 − 已用 |
+| OpenAI 兼容账单（OneAPI / NewAPI 系中转站） | `GET /v1/dashboard/billing/subscription` + `/usage` | 有总额度时给余额，没设上限时给累计已用 |
+
+**没有开放接口的会明说**，不会伪装成查询失败：智谱、火山、阿里云、Anthropic、Gemini、书生（intern-ai）等直接标「无公开接口，只能到控制台查看」。
+
+几个使用细节：
+
+- 第一次打开面板会自动查一遍；之后显示的是上次结果，点「全部查询」或行内「重查」才刷新。
+- 查询结果缓存在 `plugin_data/provider_hub/balance_cache.json`，刷新页面、重开 WebUI 都还在。
+- 低于 10（按原始数值，不跨币种换算）标黄提示「余额偏低」。
+- 单个来源失败不影响其它来源；失败原因会写清楚（key 无效 / 没有该端点 / 超时 / 网络错误）。
+- **key 不会返回给页面**，接口只回来源名、域名、协议类型和金额。
+
 ## 同步时做了什么
 
 - **核心配置（全局 + 配置档）**：不直接写文件，而是调用 dashboard 的 `/api/config/astrbot/update`。服务端保存后会执行 `reload_pipeline_scheduler()`，流水线立即用新配置重建，**不需要重启 core，WebUI 端口也不会变**。
@@ -147,6 +175,7 @@ Agent 通常只改第一层，于是：
 | 配置备份 | `data/config_backups/provider_hub-<时间>/` |
 | 撤回栈（最近 10 次操作的写前快照索引） | `data/plugin_data/provider_hub/undo_stack.json` |
 | 恢复记录（最近 10 次撤回前的状态索引） | `data/plugin_data/provider_hub/redo_stack.json` |
+| 余额查询缓存 | `data/plugin_data/provider_hub/balance_cache.json` |
 | 同步历史（最近 50 条） | `data/plugin_data/provider_hub/history.jsonl` |
 | 上次连通的管理端口 | `data/plugin_data/provider_hub/dashboard_port.txt` |
 

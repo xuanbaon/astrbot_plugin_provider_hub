@@ -1,4 +1,4 @@
-"""模型提供商统一管理（provider_hub）。
+"""模型提供商统一管理（astrbot_plugin_provider_hub）。
 
 问题背景
 --------
@@ -41,7 +41,7 @@ embedding 填进对话位。
   服务端保存后会调用 ``reload_pipeline_scheduler()``，流水线当场重建。
 * 插件配置精确改 JSON 字段后，调用 ``/api/plugin/reload`` 让该插件重新加载。
 * 每次同步前把涉及的文件备份到 ``data/config_backups/provider_hub-<时间>/``，
-  同步历史追加到 ``data/plugin_data/provider_hub/history.jsonl``。
+  同步历史追加到 ``data/plugin_data/astrbot_plugin_provider_hub/history.jsonl``。
 * 所有持久化数据都在 ``data`` 目录下，插件自身目录只放代码与静态页面，
   因此更新/重装插件不会丢数据。
 * 网络请求统一用 httpx（异步），不使用 requests。
@@ -70,8 +70,10 @@ from quart import request
 from astrbot.api import logger
 from astrbot.api.star import Context, Star, register
 
-PLUGIN_NAME = "provider_hub"
-PLUGIN_VERSION = "1.9.0"
+# 插件名必须与 metadata.yaml 的 name 一致：它同时决定注册名、web 路由前缀
+# （/api/plug/<name>/*）和 data/plugin_data/<name>/ 数据目录。
+PLUGIN_NAME = "astrbot_plugin_provider_hub"
+PLUGIN_VERSION = "1.10.0"
 
 # ---------------------------------------------------------------- 目录约定
 # main.py 位于 <data>/plugins/astrbot_plugin_provider_hub/，parents[2] 即 data 目录。
@@ -94,6 +96,40 @@ REDO_LIMIT = 10
 PORT_HINT_FILE = PLUGIN_DATA_DIR / "dashboard_port.txt"
 # 余额查询结果缓存：面板刷新时先显示上次结果，不用每次重查。
 BALANCE_CACHE_FILE = PLUGIN_DATA_DIR / "balance_cache.json"
+
+# 1.9.x 之前插件名是 provider_hub，数据落在 plugin_data/provider_hub/。
+# 改名后首次启动把旧目录整体搬过来一次，撤回栈 / 余额缓存 / 同步历史都不丢。
+_LEGACY_PLUGIN_DATA_DIR = DATA_DIR / "plugin_data" / "provider_hub"
+
+
+def _migrate_legacy_data() -> None:
+    """把旧插件名下的数据目录迁移到新名字下（幂等，只搬一次）。"""
+    try:
+        if not _LEGACY_PLUGIN_DATA_DIR.is_dir():
+            return
+        if _LEGACY_PLUGIN_DATA_DIR.resolve() == PLUGIN_DATA_DIR.resolve():
+            return
+        PLUGIN_DATA_DIR.mkdir(parents=True, exist_ok=True)
+        moved = 0
+        for item in _LEGACY_PLUGIN_DATA_DIR.iterdir():
+            target = PLUGIN_DATA_DIR / item.name
+            if target.exists():  # 新目录已有同名文件，保留新的
+                continue
+            shutil.move(str(item), str(target))
+            moved += 1
+        try:
+            _LEGACY_PLUGIN_DATA_DIR.rmdir()  # 空目录才删，非空则留着无害
+        except OSError:
+            pass
+        if moved:
+            logger.info(
+                "[provider_hub] 已把旧数据目录 %s 迁移到 %s（%d 项）",
+                _LEGACY_PLUGIN_DATA_DIR,
+                PLUGIN_DATA_DIR,
+                moved,
+            )
+    except Exception as exc:  # noqa: BLE001 - 迁移失败不能影响插件启动
+        logger.warning("[provider_hub] 迁移旧数据目录失败: %s", exc)
 
 # ---------------------------------------------------------------- 分类口径
 # 键与 astrbot.core.provider.entities.ProviderType 的取值完全一致。
@@ -1639,6 +1675,7 @@ async def _check_core(providers: list[dict]) -> dict:
 @register(PLUGIN_NAME, "xuanbaon", "模型提供商（供应商）引用统一管理与同步", PLUGIN_VERSION)
 class ProviderHubPlugin(Star):
     def __init__(self, context: Context, config: Any = None) -> None:
+        _migrate_legacy_data()
         super().__init__(context, config)
         self.context.register_web_api(
             f"/{PLUGIN_NAME}/state", self.api_state, ["GET"], "扫描供应商与引用点"

@@ -1,4 +1,4 @@
-name: provider_hub
+name: astrbot_plugin_provider_hub
 display_name: 模型提供商统一管理
 short_desc: 按五类能力扫描核心与所有插件配置里的模型供应商引用，一处修改、一键同步
 desc: >-
@@ -29,7 +29,7 @@ desc: >-
   建自包含条目，写盘后当场生效、不用重启；新增也能用「撤回上一步」删掉。
   页面提供「重新扫描」按钮，随时按本体最新配置刷新；
   不启动任何常驻监听进程，只在点击同步、复制、撤回、查询余额或添加时工作。
-version: 1.9.0
+version: 1.10.0
 author: xuanbaon
 repo: "https://github.com/xuanbaon/astrbot_plugin_provider_hub"
 astrbot_version: ">=4.17.0"

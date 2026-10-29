@@ -1,4 +1,4 @@
-# 模型提供商统一管理（provider_hub）
+# 模型提供商统一管理（astrbot_plugin_provider_hub）
 
 ## 这个插件解决什么问题
 
@@ -62,9 +62,9 @@ Agent 通常只改第一层，于是：
 | 填仓库地址 | WebUI → 插件 → 安装插件 → 填 `https://github.com/xuanbaon/astrbot_plugin_provider_hub` |
 | 上传压缩包 | 同上页面选「上传文件」，选 `astrbot_plugin_provider_hub-v*.zip` |
 
-本体装插件时会把仓库的 zip 解压到 `data/plugins/<metadata.name>/`，目录名取自 `metadata.yaml` 里的 `name`（本插件为 `provider_hub`）。本插件不依赖任何第三方库，不需要额外 `pip install`。
+本体装插件时会把仓库的 zip 解压到 `data/plugins/<metadata.name>/`，目录名取自 `metadata.yaml` 里的 `name`（本插件为 `astrbot_plugin_provider_hub`，与仓库名一致），插件配置写在 `data/config/astrbot_plugin_provider_hub_config.json`。本插件不依赖任何第三方库，不需要额外 `pip install`。
 
-> 如果你之前是手动把文件夹拷进 `data/plugins/` 的（目录叫 `astrbot_plugin_provider_hub`），再用市场装一次会出现**两个同名插件**（注册名都取自 metadata）。升级请用「更新」而不是重复安装，或先删掉旧目录。
+> 从 1.9.x 及更早版本升级：插件名已统一为 `astrbot_plugin_provider_hub`，web 接口前缀随之变为 `/api/plug/astrbot_plugin_provider_hub/*`（页面会自动跟着变，不用手改）。旧版本留下的 `data/plugin_data/provider_hub/` 会在首次启动时自动搬到 `data/plugin_data/astrbot_plugin_provider_hub/`，撤回栈、余额缓存、同步历史都保留。如果你的目录当时叫 `provider_hub`，升级请用「更新」或先删掉旧目录，避免出现两个同名插件。
 
 ## 使用方法
 
@@ -169,7 +169,7 @@ Agent 通常只改第一层，于是：
 几个使用细节：
 
 - 第一次打开面板会自动查一遍；之后显示的是上次结果，点「全部查询」或行内「重查」才刷新。
-- 查询结果缓存在 `plugin_data/provider_hub/balance_cache.json`，刷新页面、重开 WebUI 都还在。
+- 查询结果缓存在 `plugin_data/astrbot_plugin_provider_hub/balance_cache.json`，刷新页面、重开 WebUI 都还在。
 - 低于 10（按原始数值，不跨币种换算）标黄提示「余额偏低」。
 - 单个来源失败不影响其它来源；失败原因会写清楚（key 无效 / 没有该端点 / 超时 / 网络错误）。
 - **key 不会返回给页面**，接口只回来源名、域名、协议类型和金额。
@@ -214,11 +214,11 @@ Agent 通常只改第一层，于是：
 | 内容 | 路径 |
 | --- | --- |
 | 配置备份 | `data/config_backups/provider_hub-<时间>/` |
-| 撤回栈（最近 10 次操作的写前快照索引） | `data/plugin_data/provider_hub/undo_stack.json` |
-| 恢复记录（最近 10 次撤回前的状态索引） | `data/plugin_data/provider_hub/redo_stack.json` |
-| 余额查询缓存 | `data/plugin_data/provider_hub/balance_cache.json` |
-| 同步历史（最近 50 条） | `data/plugin_data/provider_hub/history.jsonl` |
-| 上次连通的管理端口 | `data/plugin_data/provider_hub/dashboard_port.txt` |
+| 撤回栈（最近 10 次操作的写前快照索引） | `data/plugin_data/astrbot_plugin_provider_hub/undo_stack.json` |
+| 恢复记录（最近 10 次撤回前的状态索引） | `data/plugin_data/astrbot_plugin_provider_hub/redo_stack.json` |
+| 余额查询缓存 | `data/plugin_data/astrbot_plugin_provider_hub/balance_cache.json` |
+| 同步历史（最近 50 条） | `data/plugin_data/astrbot_plugin_provider_hub/history.jsonl` |
+| 上次连通的管理端口 | `data/plugin_data/astrbot_plugin_provider_hub/dashboard_port.txt` |
 
 同步历史记录每次操作的时间、成功/失败/拒绝数量、备份路径以及逐条改动，便于事后核对「谁在什么时候把供应商改成了什么」。
 

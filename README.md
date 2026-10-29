@@ -52,6 +52,20 @@ Agent 通常只改第一层，于是：
 - 每次扫描还会用本体接口 `/api/v1/providers` 与核心内存里的供应商列表**对账**：若磁盘配置与核心内存不一致（手改过文件却没重载），扫描结果会直接提示差异数量和具体 id。
 
 
+## 安装
+
+要求 **AstrBot >= 4.17.0**，装完不需要额外配置，直接打开插件页即可用。
+
+| 方式 | 操作 |
+| --- | --- |
+| 插件市场 | WebUI → 插件 → 插件市场，搜索「模型提供商统一管理」→ 安装 |
+| 填仓库地址 | WebUI → 插件 → 安装插件 → 填 `https://github.com/xuanbaon/astrbot_plugin_provider_hub` |
+| 上传压缩包 | 同上页面选「上传文件」，选 `astrbot_plugin_provider_hub-v*.zip` |
+
+本体装插件时会把仓库的 zip 解压到 `data/plugins/<metadata.name>/`，目录名取自 `metadata.yaml` 里的 `name`（本插件为 `provider_hub`）。本插件不依赖任何第三方库，不需要额外 `pip install`。
+
+> 如果你之前是手动把文件夹拷进 `data/plugins/` 的（目录叫 `astrbot_plugin_provider_hub`），再用市场装一次会出现**两个同名插件**（注册名都取自 metadata）。升级请用「更新」而不是重复安装，或先删掉旧目录。
+
 ## 使用方法
 
 1. 打开 AstrBot WebUI → 插件 → 「模型提供商统一管理」页面。

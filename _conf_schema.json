@@ -2,6 +2,6 @@
   "enabled": {
     "type": "bool",
     "default": true,
-    "description": "启用供应商统一管理页面（关闭后仍可在插件页手动打开，仅作标记用）"
+    "description": "启用「模型提供商统一管理」插件页（仅作标记，关闭后仍可从插件页进入）"
   }
 }

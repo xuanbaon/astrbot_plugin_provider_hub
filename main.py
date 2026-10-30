@@ -73,7 +73,7 @@ from astrbot.api.star import Context, Star, register
 # 插件名必须与 metadata.yaml 的 name 一致：它同时决定注册名、web 路由前缀
 # （/api/plug/<name>/*）和 data/plugin_data/<name>/ 数据目录。
 PLUGIN_NAME = "astrbot_plugin_provider_hub"
-PLUGIN_VERSION = "1.10.0"
+PLUGIN_VERSION = "1.11.0"
 
 # ---------------------------------------------------------------- 目录约定
 # main.py 位于 <data>/plugins/astrbot_plugin_provider_hub/，parents[2] 即 data 目录。
@@ -1678,6 +1678,221 @@ async def _check_core(providers: list[dict]) -> dict:
     "把主配置、各会话配置档与各插件里的模型提供商统一管理、一键写回",
     PLUGIN_VERSION,
 )
+async def _write_changes(changes: list, kind: str, summary: str) -> dict:
+    """把一组供应商引用改动写回配置（写前备份、写后登记撤回栈）。
+
+    ``changes`` 每项字段与 ``api_apply`` 的提交格式一致：单值字段用 ``value``、
+    多值字段用 ``values``；``kind`` 记进历史与撤回栈，``summary`` 里的 ``{n}``
+    会被替换成实际写入的处数。
+    """
+    try:
+        providers, _meta = _load_providers()
+    except (OSError, ValueError) as exc:
+        logger.error("[provider_hub] 读取供应商失败: %s", exc, exc_info=True)
+        return {"status": "error", "message": f"读取供应商失败: {exc}", "data": {}}
+    valid_ids = {item["id"] for item in providers}
+    type_of = {item["id"]: item["provider_type"] for item in providers}
+
+    grouped: dict[tuple[str, str], list[dict]] = {}
+    rejected: list[dict] = []
+    for item in changes:
+        if not isinstance(item, dict):
+            rejected.append({"file": "", "path": "", "reason": "改动项格式非法"})
+            continue
+        file = str(item.get("file") or "")
+        field_path = str(item.get("path") or "")
+        conf_id = str(item.get("conf_id") or "")
+        plugin_id = str(item.get("plugin_id") or "")
+        expected_type = str(item.get("provider_type") or "")
+
+        # 多值字段（如回退对话模型）用 values 数组提交，单值字段用 value。
+        raw_values = item.get("values")
+        multi = isinstance(raw_values, list)
+        if multi:
+            values = []
+            for raw in raw_values:
+                text = str(raw or "").strip()
+                if text and text not in values:
+                    values.append(text)
+        else:
+            text = str(item.get("value") or "").strip()
+            values = [text] if text else []
+
+        if not file or not field_path:
+            rejected.append(
+                {"file": file, "path": field_path, "reason": "缺少文件名或字段路径"}
+            )
+            continue
+        if not values and not multi:
+            rejected.append(
+                {"file": file, "path": field_path, "reason": "没有选择供应商"}
+            )
+            continue
+        unknown = [value for value in values if value not in valid_ids]
+        if unknown:
+            rejected.append(
+                {
+                    "file": file,
+                    "path": field_path,
+                    "reason": "未知供应商: " + "、".join(unknown),
+                }
+            )
+            continue
+        # 类型守卫：禁止把嵌入模型填进对话位这类跨类误配。
+        mismatch = [
+            value
+            for value in values
+            if expected_type
+            and expected_type in PROVIDER_TYPE_LABELS
+            and type_of[value] != expected_type
+        ]
+        if mismatch:
+            value = mismatch[0]
+            rejected.append(
+                {
+                    "file": file,
+                    "path": field_path,
+                    "reason": (
+                        f"类型不匹配：该位置需要{PROVIDER_TYPE_LABELS[expected_type]}类，"
+                        f"而 {value} 是{PROVIDER_TYPE_LABELS[type_of[value]]}类"
+                    ),
+                }
+            )
+            continue
+        if not (DATA_DIR / file).exists():
+            rejected.append(
+                {"file": file, "path": field_path, "reason": "配置文件不存在"}
+            )
+            continue
+        grouped.setdefault((conf_id, plugin_id), []).append(
+            {
+                "file": file,
+                "path": field_path,
+                # 多值字段整体回写数组，单值字段写字符串。
+                "value": values if multi else values[0],
+                "multi": multi,
+            }
+        )
+
+    if not grouped:
+        return {
+            "status": "error",
+            "message": "全部改动被拒绝",
+            "data": {"rejected": rejected},
+        }
+
+    backup_dir = _backup(
+        sorted({entry["file"] for items in grouped.values() for entry in items})
+    )
+    try:
+        dashboard = _Dashboard()
+    except DashboardError as exc:
+        return {
+            "status": "error",
+            "message": str(exc),
+            "data": {"rejected": rejected},
+        }
+
+    applied: list[dict] = []
+    failed: list[dict] = []
+
+    for (conf_id, plugin_id), items in grouped.items():
+        # ---- 核心配置（全局 / 会话配置档）：走官方保存接口，保存后自动热重载
+        if conf_id:
+            try:
+                config = await dashboard.get_conf(conf_id)
+                for entry in items:
+                    _set_path(config, entry["path"], entry["value"])
+                message = await dashboard.save_conf(conf_id, config)
+                for entry in items:
+                    applied.append({**entry, "scope": conf_id, "result": message})
+            except (DashboardError, KeyError, IndexError, TypeError) as exc:
+                logger.error(
+                    "[provider_hub] 保存 %s 失败: %s", conf_id, exc, exc_info=True
+                )
+                for entry in items:
+                    failed.append(
+                        {**entry, "scope": conf_id, "error": str(exc)[:300]}
+                    )
+            continue
+
+        # ---- 插件配置：精确改 JSON 字段（不走表单，避免 schema 默认值回填）
+        touched: set[str] = set()
+        for entry in items:
+            target = DATA_DIR / entry["file"]
+            try:
+                config = _read_json(target)
+                _set_path(config, entry["path"], entry["value"])
+                _write_json(target, config)
+                touched.add(entry["file"])
+                applied.append({**entry, "scope": plugin_id, "result": "written"})
+            except (OSError, ValueError, KeyError, IndexError, TypeError) as exc:
+                logger.error(
+                    "[provider_hub] 写入 %s 失败: %s",
+                    entry["file"],
+                    exc,
+                    exc_info=True,
+                )
+                failed.append(
+                    {**entry, "scope": plugin_id, "error": str(exc)[:300]}
+                )
+        if touched and plugin_id:
+            try:
+                await dashboard.reload_plugin(plugin_id)
+            except DashboardError as exc:
+                # 写盘已成功，只是重载失败：提示但不计为失败项。
+                logger.warning(
+                    "[provider_hub] 重载插件 %s 失败: %s", plugin_id, exc
+                )
+
+    _append_history(
+        {
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "kind": kind,
+            "applied": len(applied),
+            "failed": len(failed),
+            "rejected": len(rejected),
+            "backup": backup_dir,
+            "changes": applied,
+        }
+    )
+
+    # 登记到撤回栈：备份目录里就是这次写盘前的原文件
+    if applied:
+        scopes: dict[str, dict] = {}
+        for (conf_id, plugin_id), items in grouped.items():
+            for entry in items:
+                scopes.setdefault(
+                    entry["file"],
+                    {
+                        "file": entry["file"],
+                        "conf_id": conf_id,
+                        "plugin_id": plugin_id,
+                    },
+                )
+        _push_undo(
+            {
+                "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "kind": kind,
+                "summary": summary.replace("{n}", str(len(applied))),
+                "backup": backup_dir,
+                "files": list(scopes.values()),
+            }
+        )
+        _clear_redo()
+
+    return {
+        "status": "ok" if not failed else "partial",
+        "message": f"已写入 {len(applied)} 处，失败 {len(failed)} 处，拒绝 {len(rejected)} 处",
+        "data": {
+            "applied": applied,
+            "failed": failed,
+            "rejected": rejected,
+            "backup": backup_dir,
+        },
+    }
+
+
 class ProviderHubPlugin(Star):
     def __init__(self, context: Context, config: Any = None) -> None:
         _migrate_legacy_data()
@@ -1693,6 +1908,12 @@ class ProviderHubPlugin(Star):
             self.api_copy,
             ["POST"],
             "把一个配置的供应商设置复制到另一个配置",
+        )
+        self.context.register_web_api(
+            f"/{PLUGIN_NAME}/replace",
+            self.api_replace,
+            ["POST"],
+            "把一个供应商的引用一次性换成另一个供应商",
         )
         self.context.register_web_api(
             f"/{PLUGIN_NAME}/undo",
@@ -2049,212 +2270,124 @@ class ProviderHubPlugin(Star):
         changes = payload.get("changes") or []
         if not isinstance(changes, list) or not changes:
             return {"status": "error", "message": "没有需要同步的改动", "data": {}}
+        return await _write_changes(changes, "sync", "同步 {n} 处供应商引用")
+
+    async def api_replace(self, **_kwargs):
+        """把一个供应商的所有引用一次性换成另一个供应商。
+
+        只改「引用哪个模型」——供应商本身（来源、密钥、模型条目）一律保留，所以
+        换完还能换回来。目标必须与每个位置要求的类型一致，否则该处跳过并说明原因；
+        多值字段（回退对话模型等）逐项替换、去重后整体回写，其余项与顺序不变。
+        """
+        payload = await request.get_json(silent=True) or {}
+        src = str(payload.get("from") or "").strip()
+        dst = str(payload.get("to") or "").strip()
+        scope = str(payload.get("scope") or "all").strip() or "all"
+        if not src or not dst:
+            return {
+                "status": "error",
+                "message": "需要同时指定源供应商和目标供应商",
+                "data": {},
+            }
+        if src == dst:
+            return {
+                "status": "error",
+                "message": "源供应商和目标供应商不能是同一个",
+                "data": {},
+            }
 
         try:
             providers, _meta = _load_providers()
         except (OSError, ValueError) as exc:
-            logger.error("[provider_hub] 读取供应商失败: %s", exc, exc_info=True)
+            logger.error("[provider_hub] 替换前读取供应商失败: %s", exc, exc_info=True)
             return {"status": "error", "message": f"读取供应商失败: {exc}", "data": {}}
-        valid_ids = {item["id"] for item in providers}
+
         type_of = {item["id"]: item["provider_type"] for item in providers}
+        if src not in type_of:
+            return {"status": "error", "message": f"找不到供应商: {src}", "data": {}}
+        if dst not in type_of:
+            return {"status": "error", "message": f"找不到供应商: {dst}", "data": {}}
+        if type_of[src] != type_of[dst]:
+            return {
+                "status": "error",
+                "message": (
+                    "两个供应商的能力类型不同："
+                    f"{src} 是{PROVIDER_TYPE_LABELS.get(type_of[src], type_of[src])}类，"
+                    f"{dst} 是{PROVIDER_TYPE_LABELS.get(type_of[dst], type_of[dst])}类。"
+                    "跨类替换没有意义（对话模型和嵌入模型不能互换），请选同类型的。"
+                ),
+                "data": {},
+            }
 
-        grouped: dict[tuple[str, str], list[dict]] = {}
-        rejected: list[dict] = []
-        for item in changes:
-            if not isinstance(item, dict):
-                rejected.append({"file": "", "path": "", "reason": "改动项格式非法"})
-                continue
-            file = str(item.get("file") or "")
-            field_path = str(item.get("path") or "")
-            conf_id = str(item.get("conf_id") or "")
-            plugin_id = str(item.get("plugin_id") or "")
-            expected_type = str(item.get("provider_type") or "")
+        refs = _scan_refs(providers)
 
-            # 多值字段（如回退对话模型）用 values 数组提交，单值字段用 value。
-            raw_values = item.get("values")
-            multi = isinstance(raw_values, list)
-            if multi:
-                values = []
-                for raw in raw_values:
-                    text = str(raw or "").strip()
-                    if text and text not in values:
-                        values.append(text)
-            else:
-                text = str(item.get("value") or "").strip()
-                values = [text] if text else []
+        def in_scope(ref: dict) -> bool:
+            if scope in ("", "all"):
+                return True
+            if scope == "plugin":
+                return not ref["conf_id"]
+            return ref["conf_id"] == scope
 
-            if not file or not field_path:
-                rejected.append(
-                    {"file": file, "path": field_path, "reason": "缺少文件名或字段路径"}
-                )
+        want = PROVIDER_TYPE_LABELS.get(type_of[dst], type_of[dst])
+        changes: list[dict] = []
+        skipped: list[dict] = []
+        for ref in refs:
+            if not in_scope(ref):
                 continue
-            if not values and not multi:
-                rejected.append(
-                    {"file": file, "path": field_path, "reason": "没有选择供应商"}
-                )
+            values = ref["values"]
+            if src not in values:
                 continue
-            unknown = [value for value in values if value not in valid_ids]
-            if unknown:
-                rejected.append(
+            expected = ref["provider_type"]
+            if expected in PROVIDER_TYPE_LABELS and type_of[dst] != expected:
+                skipped.append(
                     {
-                        "file": file,
-                        "path": field_path,
-                        "reason": "未知供应商: " + "、".join(unknown),
-                    }
-                )
-                continue
-            # 类型守卫：禁止把嵌入模型填进对话位这类跨类误配。
-            mismatch = [
-                value
-                for value in values
-                if expected_type
-                and expected_type in PROVIDER_TYPE_LABELS
-                and type_of[value] != expected_type
-            ]
-            if mismatch:
-                value = mismatch[0]
-                rejected.append(
-                    {
-                        "file": file,
-                        "path": field_path,
+                        "file": ref["file"],
+                        "path": ref["path"],
                         "reason": (
-                            f"类型不匹配：该位置需要{PROVIDER_TYPE_LABELS[expected_type]}类，"
-                            f"而 {value} 是{PROVIDER_TYPE_LABELS[type_of[value]]}类"
+                            f"该位置需要{PROVIDER_TYPE_LABELS[expected]}类，"
+                            f"而 {dst} 是{want}类，未替换"
                         ),
                     }
                 )
                 continue
-            if not (DATA_DIR / file).exists():
-                rejected.append(
-                    {"file": file, "path": field_path, "reason": "配置文件不存在"}
-                )
-                continue
-            grouped.setdefault((conf_id, plugin_id), []).append(
-                {
-                    "file": file,
-                    "path": field_path,
-                    # 多值字段整体回写数组，单值字段写字符串。
-                    "value": values if multi else values[0],
-                    "multi": multi,
-                }
-            )
+            change = {
+                "file": ref["file"],
+                "path": ref["path"],
+                "conf_id": ref["conf_id"],
+                "plugin_id": ref["plugin_id"],
+                "provider_type": expected,
+            }
+            if ref["multi"]:
+                merged: list[str] = []
+                for value in values:
+                    picked = dst if value == src else value
+                    if picked not in merged:
+                        merged.append(picked)
+                if merged == values:
+                    continue
+                change["values"] = merged
+            else:
+                change["value"] = dst
+            changes.append(change)
 
-        if not grouped:
+        if not changes:
             return {
                 "status": "error",
-                "message": "全部改动被拒绝",
-                "data": {"rejected": rejected},
+                "message": (
+                    f"没有把「{src}」换成「{dst}」的位置"
+                    + ("：命中的位置类型不符，见下方原因" if skipped else "")
+                ),
+                "data": {"skipped": skipped, "applied": []},
             }
 
-        backup_dir = _backup(
-            sorted({entry["file"] for items in grouped.values() for entry in items})
+        result = await _write_changes(
+            changes, "replace", f"把「{src}」换成「{dst}」：{{n}} 处"
         )
-        try:
-            dashboard = _Dashboard()
-        except DashboardError as exc:
-            return {
-                "status": "error",
-                "message": str(exc),
-                "data": {"rejected": rejected},
-            }
-
-        applied: list[dict] = []
-        failed: list[dict] = []
-
-        for (conf_id, plugin_id), items in grouped.items():
-            # ---- 核心配置（全局 / 会话配置档）：走官方保存接口，保存后自动热重载
-            if conf_id:
-                try:
-                    config = await dashboard.get_conf(conf_id)
-                    for entry in items:
-                        _set_path(config, entry["path"], entry["value"])
-                    message = await dashboard.save_conf(conf_id, config)
-                    for entry in items:
-                        applied.append({**entry, "scope": conf_id, "result": message})
-                except (DashboardError, KeyError, IndexError, TypeError) as exc:
-                    logger.error(
-                        "[provider_hub] 保存 %s 失败: %s", conf_id, exc, exc_info=True
-                    )
-                    for entry in items:
-                        failed.append(
-                            {**entry, "scope": conf_id, "error": str(exc)[:300]}
-                        )
-                continue
-
-            # ---- 插件配置：精确改 JSON 字段（不走表单，避免 schema 默认值回填）
-            touched: set[str] = set()
-            for entry in items:
-                target = DATA_DIR / entry["file"]
-                try:
-                    config = _read_json(target)
-                    _set_path(config, entry["path"], entry["value"])
-                    _write_json(target, config)
-                    touched.add(entry["file"])
-                    applied.append({**entry, "scope": plugin_id, "result": "written"})
-                except (OSError, ValueError, KeyError, IndexError, TypeError) as exc:
-                    logger.error(
-                        "[provider_hub] 写入 %s 失败: %s",
-                        entry["file"],
-                        exc,
-                        exc_info=True,
-                    )
-                    failed.append(
-                        {**entry, "scope": plugin_id, "error": str(exc)[:300]}
-                    )
-            if touched and plugin_id:
-                try:
-                    await dashboard.reload_plugin(plugin_id)
-                except DashboardError as exc:
-                    # 写盘已成功，只是重载失败：提示但不计为失败项。
-                    logger.warning(
-                        "[provider_hub] 重载插件 %s 失败: %s", plugin_id, exc
-                    )
-
-        _append_history(
-            {
-                "time": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "applied": len(applied),
-                "failed": len(failed),
-                "rejected": len(rejected),
-                "backup": backup_dir,
-                "changes": applied,
-            }
-        )
-
-        # 登记到撤回栈：备份目录里就是这次写盘前的原文件
-        if applied:
-            scopes: dict[str, dict] = {}
-            for (conf_id, plugin_id), items in grouped.items():
-                for entry in items:
-                    scopes.setdefault(
-                        entry["file"],
-                        {
-                            "file": entry["file"],
-                            "conf_id": conf_id,
-                            "plugin_id": plugin_id,
-                        },
-                    )
-            _push_undo(
-                {
-                    "time": time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "kind": "sync",
-                    "summary": f"同步 {len(applied)} 处供应商引用",
-                    "backup": backup_dir,
-                    "files": list(scopes.values()),
-                }
-            )
-            _clear_redo()
-
-        return {
-            "status": "ok" if not failed else "partial",
-            "message": f"已同步 {len(applied)} 处，失败 {len(failed)} 处，拒绝 {len(rejected)} 处",
-            "data": {
-                "applied": applied,
-                "failed": failed,
-                "rejected": rejected,
-                "backup": backup_dir,
-            },
-        }
+        data = result.setdefault("data", {})
+        data["skipped"] = skipped
+        data["from"] = src
+        data["to"] = dst
+        return result
 
     async def api_copy(self, **_kwargs):
         """把一个配置里的供应商设置整份复制到另一个配置。

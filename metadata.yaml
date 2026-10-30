@@ -5,7 +5,7 @@ desc: >-
   统一管理 AstrBot 的模型提供商（供应商）：主配置、各会话配置档、各插件配置里散落的
   供应商引用，都能在同一页里选中、修改并一键写回，不必逐个文件翻。
   详细用法、注意事项与数据存放位置见 README。
-version: 1.10.0
+version: 1.11.0
 author: xuanbaon
 repo: "https://github.com/xuanbaon/astrbot_plugin_provider_hub"
 astrbot_version: ">=4.17.0"

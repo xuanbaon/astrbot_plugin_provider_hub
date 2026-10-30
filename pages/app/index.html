@@ -453,6 +453,8 @@
       供应商有增删改时，点「重新扫描」刷新即可。
       「复制配置…」把某个配置里的供应商设置整份搬到另一个配置（只动供应商字段，
       复制前自动备份目标）；分组标题点一下就能收起/展开，配置多时不必反复滚动。
+      「换供应商…」把某个供应商的全部引用一次性换成另一个同类型供应商——只换引用，
+      供应商本身（来源、密钥、条目）保留，换错了点「撤回上一步」即可还原。
       「查询余额」按来源查各家的账户余额，只读不写盘。
       「＋ 添加提供商」（或各能力卡片右上角的 ＋）能直接新增：类型取自本体的提供商模板，
       对话类建「来源 + 模型条目」，其余类别建自包含条目，写盘后当场生效、不用重启。
@@ -467,6 +469,7 @@
       <button id="rescan" type="button" title="重新读取配置并分类（只读，不写盘）">重新扫描</button>
       <button id="add-btn" type="button" title="新增提供商：与本体的「模型提供商」面板同一套类型与字段">＋ 添加提供商</button>
       <button id="copy-btn" type="button" title="把一个配置里的供应商设置整体复制到另一个配置">复制配置…</button>
+      <button id="swap-btn" type="button" title="把某个供应商的所有引用一次性换成另一个同类型供应商（不动供应商本身）">换供应商…</button>
       <button id="undo-btn" type="button" title="撤回最近一次同步或复制">撤回上一步</button>
       <button id="redo-btn" type="button" title="恢复：把刚才撤回的内容放回去">恢复</button>
       <button id="balance-btn" type="button" title="查询各供应商账户余额（只读，不改任何配置）">查询余额</button>
@@ -557,6 +560,25 @@
       </div>
     </div>
 
+    <div class="modal" id="swap-modal" hidden>
+      <div class="modal-box">
+        <h3>一键换供应商</h3>
+        <p>
+          把<b>某个供应商</b>在所有配置里的引用一次性换成<b>另一个供应商</b>。
+          只换「引用」，供应商本身（来源、密钥、模型条目）一律保留——旧的那个还在，
+          需要时可以在本体面板里删掉；换错了点「撤回上一步」就能还原。
+        </p>
+        <label>把这个供应商 <select id="swap-from"></select></label>
+        <label>换成 <select id="swap-to"></select></label>
+        <label>范围 <select id="swap-scope"><option value="all">全部配置文件</option></select></label>
+        <div class="modal-hint" id="swap-hint"></div>
+        <div class="modal-actions">
+          <button id="swap-cancel" type="button">取消</button>
+          <button id="swap-run" class="primary" type="button">开始替换</button>
+        </div>
+      </div>
+    </div>
+
     <div class="modal" id="balance-modal" hidden>
       <div class="modal-box wide">
         <h3>供应商余额</h3>
@@ -616,6 +638,13 @@
         const copyToSelect = el("copy-to");
         const copyHint = el("copy-hint");
         const copyRunBtn = el("copy-run");
+        const swapBtn = el("swap-btn");
+        const swapModal = el("swap-modal");
+        const swapFromSelect = el("swap-from");
+        const swapToSelect = el("swap-to");
+        const swapScopeSelect = el("swap-scope");
+        const swapHint = el("swap-hint");
+        const swapRunBtn = el("swap-run");
         const undoBtn = el("undo-btn");
         const undoModal = el("undo-modal");
         const undoDesc = el("undo-desc");
@@ -1571,6 +1600,222 @@
           }
         }
 
+        /* ---------------- 一键换供应商：把 A 的所有引用换成 B ---------------- */
+
+        let swapArmed = false;
+        let swapFromId = "";
+        let swapToId = "";
+
+        /** 当前范围内实际被引用的供应商（源下拉与预览都按这个范围算）。 */
+        function swapScopeRefs() {
+          const scope = swapScopeSelect.value || "all";
+          return refs.filter((ref) => {
+            if (scope === "all") return true;
+            if (scope === "plugin") return !ref.conf_id;
+            return ref.conf_id === scope;
+          });
+        }
+
+        function swapCounts() {
+          const counts = new Map();
+          for (const ref of swapScopeRefs()) {
+            for (const value of ref.values || []) {
+              counts.set(value, (counts.get(value) || 0) + 1);
+            }
+          }
+          return counts;
+        }
+
+        function fillSwapScope() {
+          swapScopeSelect.innerHTML = "";
+          swapScopeSelect.appendChild(
+            buildOption("all", "全部配置文件", profileFilter === "all")
+          );
+          if (profileFilter !== "all" && profileFilter !== "plugin") {
+            swapScopeSelect.appendChild(
+              buildOption(profileFilter, `仅「${profileLabel(profileFilter)}」`, true)
+            );
+          }
+          swapScopeSelect.appendChild(
+            buildOption("plugin", "仅插件配置", profileFilter === "plugin")
+          );
+          swapScopeSelect.value = profileFilter === "all" ? "all" : profileFilter;
+        }
+
+        function fillSwapFrom() {
+          const counts = swapCounts();
+          const used = providers.filter((item) => counts.get(item.id));
+          swapFromSelect.innerHTML = "";
+          const byType = new Map();
+          for (const item of used) {
+            const key = item.provider_type || "";
+            if (!byType.has(key)) byType.set(key, []);
+            byType.get(key).push(item);
+          }
+          const rank = (key) => {
+            const at = typeOrder.indexOf(key);
+            return at < 0 ? 99 : at;
+          };
+          for (const key of [...byType.keys()].sort((a, b) => rank(a) - rank(b))) {
+            const group = document.createElement("optgroup");
+            group.label = typeLabels[key] || key || "其他";
+            const list = byType
+              .get(key)
+              .slice()
+              .sort((a, b) => (counts.get(b.id) || 0) - (counts.get(a.id) || 0));
+            for (const item of list) {
+              group.appendChild(
+                buildOption(item.id, `${item.id} · ${counts.get(item.id)} 处`, false)
+              );
+            }
+            swapFromSelect.appendChild(group);
+          }
+          if (!used.length) {
+            swapFromSelect.appendChild(
+              buildOption("", "（该范围内没有引用任何供应商）", true)
+            );
+            return;
+          }
+          const preferred = used.some((item) => item.id === swapFromId)
+            ? swapFromId
+            : used[0].id;
+          swapFromSelect.value = preferred;
+          swapFromId = preferred;
+        }
+
+        function fillSwapTo() {
+          const src = providers.find((item) => item.id === swapFromSelect.value);
+          swapToSelect.innerHTML = "";
+          if (!src) {
+            swapToSelect.appendChild(buildOption("", "（先选源供应商）", true));
+            return;
+          }
+          const same = providers.filter(
+            (item) => item.provider_type === src.provider_type && item.id !== src.id
+          );
+          if (!same.length) {
+            swapToSelect.appendChild(
+              buildOption("", "（没有同类型的其他供应商，先添加一个）", true)
+            );
+            return;
+          }
+          for (const item of same) {
+            swapToSelect.appendChild(
+              buildOption(
+                item.id,
+                item.model ? `${item.id} · ${item.model}` : item.id,
+                item.id === swapToId
+              )
+            );
+          }
+          if (!same.some((item) => item.id === swapToId)) swapToId = same[0].id;
+          swapToSelect.value = swapToId;
+        }
+
+        /** 预览：会替换多少处、多少处类型不符会跳过。 */
+        function updateSwapHint() {
+          swapArmed = false;
+          swapRunBtn.textContent = "开始替换";
+          const src = swapFromSelect.value;
+          const dst = swapToSelect.value;
+          const target = providers.find((item) => item.id === dst);
+          if (!src || !dst || !target) {
+            swapRunBtn.disabled = true;
+            swapHint.className = "modal-hint warn";
+            swapHint.textContent =
+              "该范围内没有可替换的供应商：可以换个范围，或在「＋ 添加提供商」里先加一个同类型的。";
+            return;
+          }
+          let ok = 0;
+          let skip = 0;
+          for (const ref of swapScopeRefs()) {
+            if (!(ref.values || []).includes(src)) continue;
+            if (ref.provider_type && target.provider_type !== ref.provider_type) skip += 1;
+            else ok += 1;
+          }
+          const dirty = countDirty();
+          const parts = [];
+          parts.push(
+            ok
+              ? `将把 ${ok} 处「${src}」换成「${dst}」`
+              : `该范围内没有引用「${src}」的位置`
+          );
+          if (skip) parts.push(`${skip} 处位置要求别的类型，会跳过`);
+          if (dirty) parts.push(`另有 ${dirty} 处手工改动还没同步，替换不会带上它们`);
+          swapRunBtn.disabled = ok === 0;
+          swapHint.className = "modal-hint" + (ok && !skip ? "" : " warn");
+          swapHint.textContent = parts.join("；") + "。";
+        }
+
+        function openSwap() {
+          if (!providers.length) {
+            log("还没有任何供应商：先在「＋ 添加提供商」里加一个。", "err");
+            return;
+          }
+          swapFromId = "";
+          swapToId = "";
+          swapArmed = false;
+          swapRunBtn.textContent = "开始替换";
+          swapRunBtn.disabled = false;
+          fillSwapScope();
+          fillSwapFrom();
+          fillSwapTo();
+          updateSwapHint();
+          swapModal.hidden = false;
+        }
+
+        function closeSwap() {
+          swapModal.hidden = true;
+          swapArmed = false;
+          swapRunBtn.textContent = "开始替换";
+          swapRunBtn.disabled = false;
+        }
+
+        async function runSwap() {
+          const src = swapFromSelect.value;
+          const dst = swapToSelect.value;
+          if (!src || !dst) return;
+          // 沙箱 iframe 里 window.confirm 可能被禁用，用「再点一次」代替确认弹窗
+          if (!swapArmed) {
+            swapArmed = true;
+            swapRunBtn.textContent = "确认替换";
+            swapHint.className = "modal-hint warn";
+            swapHint.textContent = `确认把「${src}」的所有引用换成「${dst}」？旧供应商本身会保留，只是不再被引用。`;
+            return;
+          }
+          swapRunBtn.disabled = true;
+          swapRunBtn.textContent = "替换中…";
+          clearLog();
+          try {
+            const { data } = unwrap(
+              await apiPost("replace", {
+                from: src,
+                to: dst,
+                scope: swapScopeSelect.value || "all",
+              })
+            );
+            const applied = (data.applied || []).length;
+            log(`✔ 已把 ${applied} 处「${escapeText(src)}」换成「${escapeText(dst)}」。`, "ok");
+            if (data.backup) log(`原配置已备份到：${data.backup}`);
+            for (const item of data.skipped || []) {
+              log(
+                `✘ ${escapeText(item.file)} · ${escapeText(item.path)} → ${escapeText(
+                  item.reason
+                )}`,
+                "err"
+              );
+            }
+            log("换错了就点「撤回上一步」，整份还原到替换前。");
+            closeSwap();
+            await load(true);
+          } catch (err) {
+            log("替换失败：" + (err && err.message ? err.message : String(err)), "err");
+            swapArmed = false;
+            swapRunBtn.textContent = "开始替换";
+            swapRunBtn.disabled = false;
+          }
+        }
+
         /* ---------------- 撤回上一步 ---------------- */
 
         /** 上一次操作的可读描述：复制优先显示「源 → 目标」，比数量直观。 */
@@ -1590,7 +1835,7 @@
         function updateUndoButton() {
           if (!lastOp) {
             undoBtn.disabled = true;
-            undoBtn.title = "暂无可撤回的操作：只记录本页面的「一键同步」「复制配置」和「添加提供商」";
+            undoBtn.title = "暂无可撤回的操作：只记录本页面的「一键同步」「复制配置」「换供应商」和「添加提供商」";
             return;
           }
           undoBtn.disabled = false;
@@ -1599,7 +1844,7 @@
 
         function openUndo() {
           if (!lastOp) {
-            log("没有可撤回的操作：只记录本页面上的「一键同步」「复制配置」和「添加提供商」。", "err");
+            log("没有可撤回的操作：只记录本页面上的「一键同步」「复制配置」「换供应商」和「添加提供商」。", "err");
             return;
           }
           undoDesc.textContent = "";
@@ -2064,6 +2309,27 @@
         el("copy-btn").addEventListener("click", openCopy);
         el("copy-cancel").addEventListener("click", closeCopy);
         copyRunBtn.addEventListener("click", runCopy);
+        swapBtn.addEventListener("click", openSwap);
+        el("swap-cancel").addEventListener("click", closeSwap);
+        swapRunBtn.addEventListener("click", runSwap);
+        swapScopeSelect.addEventListener("change", () => {
+          fillSwapFrom();
+          fillSwapTo();
+          updateSwapHint();
+        });
+        swapFromSelect.addEventListener("change", () => {
+          swapFromId = swapFromSelect.value;
+          swapToId = "";
+          fillSwapTo();
+          updateSwapHint();
+        });
+        swapToSelect.addEventListener("change", () => {
+          swapToId = swapToSelect.value;
+          updateSwapHint();
+        });
+        swapModal.addEventListener("click", (event) => {
+          if (event.target === swapModal) closeSwap();
+        });
         copyFromSelect.addEventListener("change", armReset);
         copyToSelect.addEventListener("change", armReset);
         copyModal.addEventListener("click", (event) => {

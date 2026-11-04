@@ -68,12 +68,12 @@ import httpx
 from quart import request
 
 from astrbot.api import logger
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context, Star
 
 # 插件名必须与 metadata.yaml 的 name 一致：它同时决定注册名、web 路由前缀
 # （/api/plug/<name>/*）和 data/plugin_data/<name>/ 数据目录。
 PLUGIN_NAME = "astrbot_plugin_provider_hub"
-PLUGIN_VERSION = "1.11.0"
+PLUGIN_VERSION = "1.11.1"
 
 # ---------------------------------------------------------------- 目录约定
 # main.py 位于 <data>/plugins/astrbot_plugin_provider_hub/，parents[2] 即 data 目录。
@@ -1672,12 +1672,6 @@ async def _check_core(providers: list[dict]) -> dict:
 # ------------------------------------------------------------------ 插件主体
 
 
-@register(
-    PLUGIN_NAME,
-    "xuanbaon",
-    "把主配置、各会话配置档与各插件里的模型提供商统一管理、一键写回",
-    PLUGIN_VERSION,
-)
 async def _write_changes(changes: list, kind: str, summary: str) -> dict:
     """把一组供应商引用改动写回配置（写前备份、写后登记撤回栈）。
 
